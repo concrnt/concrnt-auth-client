@@ -5,7 +5,7 @@
 	"type": "module",
 	"scripts": {
 		"dev": "vite",
-		"build": "tsc -b && vite build",
+		"build": "pnpm --filter \"auth-client-better-auth-sample^...\" run build && tsc -b && vite build",
 		"lint": "oxlint",
 		"preview": "pnpm run build && vite preview",
 		"deploy": "pnpm run build && wrangler deploy",
