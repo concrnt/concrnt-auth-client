@@ -3,9 +3,8 @@
 // 設計の要点:
 //   - Concrnt の ID Token は「外部で署名された ID Token」なので、better-auth が OAuth / One Tap で使っている
 //     handleOAuthUserInfo にそのまま渡す。account 行 (providerId 'concrnt', accountId = CCID) があればサインイン、
-//     無ければサインアップ (signUp: 'confirm' なら確認を挟む、'disabled' なら拒否)、link ceremony なら開始したユーザーへの紐付け。
-//     専用テーブルは持たない
-//   - ceremony は 1 種類。ログインと紐付けの違いは「開始時にセッションがあり link: true だったか」だけ
+//     無ければサインアップ (signUp: 'confirm' なら確認を挟む、'disabled' なら拒否)。専用テーブルは持たない
+//   - ceremony は 1 種類 (ログインだけ)。1 ユーザーに CCID は 1 つで、既存ユーザーへの CCID の追加は提供しない
 //   - 状態は better-auth の verification テーブルの行だけ。要求ごとに 1 行 (`concrnt-auth:request:<C>`) を置き、
 //     受理時に原子的に消費する (= CIP-17 §9 手順 3 の nonce 一回限り)。別端末フローの結果は
 //     `concrnt-auth:result:<H(pollToken)>` に置き、開始したブラウザが pollToken で原子的に取り出す
@@ -13,7 +12,7 @@
 //
 //   ブラウザ                              better-auth (basePath 配下)                        Authenticator (world-app)
 //   --------                              ---------------------------                        -------------------------
-//   POST /concrnt/start {callbackURL?, newUserCallbackURL?, link?}  要求の行を作る。両方の Authorization Request URI と pollToken を返す
+//   POST /concrnt/start {callbackURL?, newUserCallbackURL?}  要求の行を作る。両方の Authorization Request URI と pollToken を返す
 //   QR (direct_post) / リンク (fragment) に
 //                                         GET  /concrnt/request/:C          <----------------- Request Object を取りに来る
 //   --- 別端末 (direct_post, §8.1) ---
@@ -31,7 +30,7 @@
 import type { BetterAuthPlugin, GenericEndpointContext } from 'better-auth'
 import { createAuthEndpoint } from '@better-auth/core/api'
 import { createPlaceholderEmail } from '@better-auth/core/utils/email'
-import { APIError, getSessionFromCtx } from 'better-auth/api'
+import { APIError } from 'better-auth/api'
 import { setSessionCookie } from 'better-auth/cookies'
 import { parseUserOutput } from 'better-auth/db'
 import { handleOAuthUserInfo } from 'better-auth/oauth2'
@@ -54,7 +53,7 @@ export interface ConcrntPluginOptions {
      * - 'auto': その場でユーザーを作ってログインする
      * - 'confirm': ユーザーを作らず `{ status: 'signup_required', profile }` を返す。ブラウザが確認を取り、
      *   POST /concrnt/sign-up で作る (再承認は不要。保留は 10 分で失効する)
-     * - 'disabled': SIGNUP_DISABLED (403)。登録済みユーザーへの追加は link ceremony で行う
+     * - 'disabled': SIGNUP_DISABLED (403)。登録済みの CCID だけがログインできる
      */
     signUp?: 'auto' | 'confirm' | 'disabled' | undefined
     /** Request Object の有効期間 (秒)。既定 300 */
@@ -82,8 +81,6 @@ interface PendingRequest {
     newUserCallbackURL?: string | undefined
     /** 開始したブラウザの秘密 pollToken の SHA-256 (base64url)。別端末フローの結果の宛先 */
     pollHash: string
-    /** link ceremony: 開始したユーザー。完了時にこのユーザーのセッションを要求する */
-    linkUserId?: string | undefined
 }
 
 /** 受理した応答 (`concrnt-auth:result:<pollHash>` に置くもの、または exchange でその場で使うもの) */
@@ -136,16 +133,13 @@ export const concrnt = (options: ConcrntPluginOptions = {}) => {
     }
 
     /**
-     * 受理済みの応答で、呼び出し元のブラウザのためにサインイン / サインアップ / 紐付けを行い、セッションを発行する。
+     * 受理済みの応答で、呼び出し元のブラウザのためにサインイン / サインアップを行い、セッションを発行する。
      * 未登録の CCID は signUp に従う ('confirm' ならここでは作らず保留にする)
      */
     const complete = async (ctx: GenericEndpointContext, outcome: Outcome) => {
         const { request, idToken, claims } = outcome
         if (!claims || !idToken) return ctx.json({ status: 'denied' as const, callbackURL: request.callbackURL })
-        if (request.linkUserId) {
-            const current = await getSessionFromCtx(ctx)
-            if (!current || current.user.id !== request.linkUserId) throw APIError.from('UNAUTHORIZED', CONCRNT_ERROR_CODES.LINK_SESSION_MISMATCH)
-        } else if (signUp !== 'auto') {
+        if (signUp !== 'auto') {
             const existing = await ctx.context.internalAdapter.findAccountByKey({ providerId: CONCRNT_PROVIDER_ID, accountId: claims.sub })
             if (!existing) {
                 if (signUp === 'disabled') throw APIError.from('FORBIDDEN', CONCRNT_ERROR_CODES.SIGNUP_DISABLED)
@@ -184,8 +178,9 @@ export const concrnt = (options: ConcrntPluginOptions = {}) => {
     }
 
     /**
-     * サインイン / サインアップ / 紐付けを行い、セッションを発行する。
-     * 判定は better-auth の handleOAuthUserInfo (OAuth / One Tap と同じもの) に任せる
+     * サインイン / サインアップを行い、セッションを発行する。
+     * 判定は better-auth の handleOAuthUserInfo (OAuth / One Tap と同じもの) に任せる:
+     * account 行があればそのユーザー (提示したブラウザが別のユーザーでログイン中でも切り替わる)、無ければ作る
      */
     const signIn = async (ctx: GenericEndpointContext, { request, idToken, claims }: Outcome & { idToken: string; claims: IdTokenClaims }) => {
         const ccid = claims.sub
@@ -201,9 +196,7 @@ export const concrnt = (options: ConcrntPluginOptions = {}) => {
             },
             account: { providerId: CONCRNT_PROVIDER_ID, accountId: ccid, idToken, scope: 'openid,profile' },
             callbackURL: request.callbackURL,
-            disableSignUp: signUp === 'disabled',
-            // link ceremony: 開始したユーザーに紐付ける。CCID が別のユーザーのものなら better-auth が CONFLICT を返す
-            selectedUser: request.linkUserId ? { userId: request.linkUserId, profile: 'preserve' } : undefined
+            disableSignUp: signUp === 'disabled'
         })
         if (result.error !== null || !result.data) {
             if (result.error === 'signup disabled') throw APIError.from('FORBIDDEN', CONCRNT_ERROR_CODES.SIGNUP_DISABLED)
@@ -231,8 +224,7 @@ export const concrnt = (options: ConcrntPluginOptions = {}) => {
             body: z
                 .object({
                     callbackURL: z.string().max(2048).optional(),
-                    newUserCallbackURL: z.string().max(2048).optional(),
-                    link: z.boolean().optional()
+                    newUserCallbackURL: z.string().max(2048).optional()
                 })
                 .optional(),
             metadata: {
@@ -240,17 +232,11 @@ export const concrnt = (options: ConcrntPluginOptions = {}) => {
                 openapi: {
                     operationId: 'startConcrnt',
                     description:
-                        'Start Sign-In with Concrnt (CIP-17). Returns the Authorization Request URIs for QR (direct_post) and link (fragment). A new user is sent to newUserCallbackURL (if given) instead of callbackURL. With link: true (session required) the verified CCID is linked to the current user instead.'
+                        'Start Sign-In with Concrnt (CIP-17). Returns the Authorization Request URIs for QR (direct_post) and link (fragment). A new user is sent to newUserCallbackURL (if given) instead of callbackURL.'
                 }
             }
         },
         async (ctx) => {
-            let linkUserId: string | undefined
-            if (ctx.body?.link) {
-                const session = await getSessionFromCtx(ctx)
-                if (!session) throw APIError.from('UNAUTHORIZED', CONCRNT_ERROR_CODES.SESSION_REQUIRED)
-                linkUserId = session.user.id
-            }
             // 新しいログインを始めたら、前回の保留中のサインアップ (signUp: 'confirm') は捨てる
             clearPendingSignUp(ctx)
             const challenge = randomToken(16)
@@ -261,8 +247,7 @@ export const concrnt = (options: ConcrntPluginOptions = {}) => {
                 exp,
                 callbackURL: ctx.body?.callbackURL ?? '/',
                 newUserCallbackURL: ctx.body?.newUserCallbackURL,
-                pollHash: await sha256(pollToken),
-                linkUserId
+                pollHash: await sha256(pollToken)
             }
             await ctx.context.internalAdapter.createVerificationValue({
                 identifier: REQUEST_PREFIX + challenge,

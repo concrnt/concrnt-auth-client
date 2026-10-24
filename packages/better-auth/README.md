@@ -7,10 +7,9 @@ Concrnt のアプリ (Authenticator) で承認してログインできるよう�
 Concrnt の ID Token は「外部で署名された ID Token」なので、better-auth が OAuth / Google One Tap で使っている
 サインイン処理 (`handleOAuthUserInfo`) にそのまま渡す。CCID は better-auth 標準の `account` テーブルに
 `providerId: 'concrnt'` / `accountId: <CCID>` として入り、**専用テーブルもマイグレーションも要らない**。
-一覧・解除は better-auth 組み込みの `listAccounts` / `unlinkAccount` で行う。
+1 ユーザーに CCID は 1 つで、既存ユーザーへの CCID の追加は提供しない。ログイン中の CCID は組み込みの `listAccounts` で読める。
 
 - 未登録の CCID はそのままサインアップになる。`signUp: 'confirm'` で「作りますか?」を挟め、`'disabled'` で既存ユーザーに限定できる
-- ログイン中のユーザーへの CCID の追加は `link: true` (クライアントの `authClient.concrnt.link()`)
 - 状態は better-auth の `verification` テーブルの行だけ。要求ごとに 1 行を置き、受理時に原子的に消費する
   (CIP-17 §9 手順 3 の nonce 一回限り)。追加のストアや secret は要らない
 - プロトコルの純粋な部分 (ID Token の検証、Authorization Request URI、display_code) は
@@ -66,12 +65,8 @@ const { data, error } = await authClient.signIn.concrnt({
 // data.status: 'ok' | 'signup_required' | 'denied' | 'expired' | 'aborted'。ok なら cookie が入っていて useSession が更新される。
 // data.isNewUser はこのログインでユーザーが作られたかどうか
 
-// ログイン中のユーザーに CCID を追加
-await authClient.concrnt.link({ onChallenge })
-
-// 一覧・解除は better-auth 組み込み
-const { data: accounts } = await authClient.listAccounts() // providerId === 'concrnt' の行が CCID
-await authClient.unlinkAccount({ accountId: account.id })  // 最後のアカウントは解除できない (ログイン不能を防ぐ)
+// ログイン中の CCID (better-auth 組み込み)
+const { data: accounts } = await authClient.listAccounts() // providerId === 'concrnt' の行の accountId が CCID
 ```
 
 - 別端末 (§8.1): クライアントが `status` をポーリングし、結果が届けばそのブラウザにセッションが入る
@@ -111,11 +106,11 @@ concrnt({
 
 | Method / Path | 役割 |
 |---|---|
-| `POST /concrnt/start` `{ callbackURL?, newUserCallbackURL?, link? }` | 要求を発行。`{ directPostUri, fragmentUri, displayCode, exp, pollToken }`。新規ユーザーは `newUserCallbackURL` (あれば) に戻る。`link: true` はセッション必須で、検証した CCID をそのユーザーに紐付ける |
+| `POST /concrnt/start` `{ callbackURL?, newUserCallbackURL? }` | 要求を発行。`{ directPostUri, fragmentUri, displayCode, exp, pollToken }`。新規ユーザーは `newUserCallbackURL` (あれば) に戻る |
 | `GET /concrnt/request/:C` | §5.3 Request Object (Authenticator が取る)。`Access-Control-Allow-Origin: *` |
 | `POST /concrnt/callback/:C` | §8.1 direct_post の受け口。`application/x-www-form-urlencoded` の `id_token` / `error`。検証して結果を預け 204。**送信者にセッションは発行しない** |
 | `GET /concrnt/callback/:C` | §8.2 fragment の着地ページ (HTML) |
-| `POST /concrnt/exchange/:C` `{ id_token?, error? }` | §8.2 提示したブラウザをサインイン/紐付けしてセッションを発行 |
+| `POST /concrnt/exchange/:C` `{ id_token?, error? }` | §8.2 提示したブラウザをサインインさせてセッションを発行 |
 | `POST /concrnt/status` `{ pollToken }` | §8.1 開始したブラウザが結果を回収。`pending` / `denied` / `ok` / `signup_required` |
 | `GET /concrnt/pending-sign-up` | `signUp: 'confirm'`: このブラウザに保留中の `{ profile }` (無ければ `null`) |
 | `POST /concrnt/sign-up` | `signUp: 'confirm'`: 保留を消費してユーザーを作り、セッションを発行 (1 回限り) |
@@ -129,9 +124,7 @@ concrnt({
 | 状況 | 結果 |
 |---|---|
 | `account` に `concrnt` / CCID の行がある | そのユーザーとしてサインイン (提示したブラウザが別のユーザーでログイン中でも切り替わる) |
-| 行が無く、通常のサインイン | ユーザーを作成して行を追加。`signUp: 'confirm'` なら作らずに `signup_required` を返し、`POST /concrnt/sign-up` で作る。`'disabled'` なら `SIGNUP_DISABLED` |
-| 行が無く、`link: true` | 開始したユーザーに行を追加。開始したセッションを持つブラウザでしか完了できない (`LINK_SESSION_MISMATCH`) |
-| 行が別のユーザーのもので、`link: true` | 409 (`account_ownership_conflict`) |
+| 行が無い | ユーザーを作成して行を追加。提示したブラウザが別のユーザーでログイン中でも、そのユーザーには付けず新しいユーザーになる (1 ユーザーに CCID は 1 つ)。`signUp: 'confirm'` なら作らずに `signup_required` を返し、`POST /concrnt/sign-up` で作る。`'disabled'` なら `SIGNUP_DISABLED` |
 
 `user.create` / `account.create` の databaseHooks や `account.updateAccountOnSignIn` など、better-auth のフックと設定はそのまま効く。
 `account.idToken` には直近の ID Token が入るので、`concrnt_domain` などの自己申告クレームが必要ならそこから読める。
@@ -142,16 +135,16 @@ concrnt({
   他人に fragment リンクを踏ませても、その人が自分でログインするだけで開始した側には何も届かない
 - **一回限り** (§9 手順 3): 要求の行を `consumeVerificationValue` で原子的に消費するので、同じ要求への同時応答は 1 件しか通らず、
   QR とリンクのどちらで成立してももう一方は使えない。検証に失敗した応答は消費しない
-- **紐付けの束縛**: `link: true` の完了は、開始したセッションを持つブラウザだけに許す。他人の ID Token を含む fragment リンクを
-  ログイン中のユーザーに踏ませても、その CCID が紐付くことはない
+- **既存ユーザーへの紐付けをしない**: 他人の ID Token を含む fragment リンクをログイン中のユーザーに踏ませても、
+  そのユーザーに CCID が付くことはない (そのブラウザが ID Token の CCID のユーザーとしてログインし直すだけ)
 - **status は POST + JSON**: GET にすると cross-site のトップレベル遷移でセッション cookie が設定できてしまう (login CSRF)。
   POST + JSON なら better-auth の CSRF モデル (JSON 限定 + cookie 同伴時の Origin 検証) に乗る
 - 着地ページのスクリプトは固定文字列で、`Content-Security-Policy: script-src 'sha256-…'` を付けて返す
 
 ## エラーコード (`$ERROR_CODES`)
 
-`CHALLENGE_NOT_FOUND` (404) · `CHALLENGE_ALREADY_USED` · `MISSING_ID_TOKEN` · `INVALID_ID_TOKEN` · `SESSION_REQUIRED` (401) ·
-`LINK_SESSION_MISMATCH` (401) · `SIGNUP_DISABLED` (403) · `NO_PENDING_SIGNUP` · `UNABLE_TO_SIGN_IN` (401)
+`CHALLENGE_NOT_FOUND` (404) · `CHALLENGE_ALREADY_USED` · `MISSING_ID_TOKEN` · `INVALID_ID_TOKEN` · `SIGNUP_DISABLED` (403) ·
+`NO_PENDING_SIGNUP` · `UNABLE_TO_SIGN_IN` (401)
 
 ## サンプル
 

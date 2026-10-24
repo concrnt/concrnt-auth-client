@@ -277,80 +277,26 @@ describe("signUp: 'confirm'", () => {
         expect(stale.status).toBe(400)
     })
 
-    it('does not interfere with link, and sign-up without a cookie is rejected', async () => {
+    it('sign-up without a pending cookie is rejected', async () => {
         const auth = await createTestAuth({ signUp: 'confirm' })
-        const owner = await signUpUser(auth)
-        const { polled } = await directPostFlow(auth, alice, { link: true }, owner.headers)
-        expect(await json(polled)).toMatchObject({ status: 'ok', user: { id: owner.user.id } })
         const res = await call(auth, 'POST', '/concrnt/sign-up')
         expect(res.status).toBe(400)
         expect(await json(res)).toMatchObject({ code: 'NO_PENDING_SIGNUP' })
     })
 })
 
-describe('link', () => {
-    it('requires a session to start and links the CCID to that user as a second account', async () => {
-        const auth = await createTestAuth()
-        const anon = await start(auth, { link: true })
-        expect(anon.res.status).toBe(401)
-        expect(await json(anon.res)).toMatchObject({ code: 'SESSION_REQUIRED' })
-
-        const owner = await signUpUser(auth)
-        const { polled } = await directPostFlow(auth, alice, { link: true }, owner.headers)
-        expect(polled.status).toBe(200)
-        expect(await json(polled)).toMatchObject({ status: 'ok', user: { id: owner.user.id } })
-        const accounts = await listAccounts(auth, owner.headers)
-        expect(accounts.map((a) => a.providerId).sort()).toEqual(['concrnt', 'credential'])
-
-        // 紐付けた CCID でログインすると同じユーザー
-        const login = await directPostFlow(auth, alice)
-        expect(await json(login.polled)).toMatchObject({ status: 'ok', user: { id: owner.user.id } })
-
-        // 紐付け済みの CCID を別のユーザーに紐付けようとすると CONFLICT
-        const other = await signUpUser(auth)
-        const conflict = await directPostFlow(auth, alice, { link: true }, other.headers)
-        expect(conflict.polled.status).toBe(409)
-        expect(await listAccounts(auth, other.headers)).toHaveLength(1)
-    })
-
-    it('refuses to complete a link for a different or missing session, on either route', async () => {
-        const auth = await createTestAuth()
-        const owner = await signUpUser(auth)
-        const other = await signUpUser(auth)
-
-        // direct_post: 別人のセッション、または無セッションでポーリング
-        const { started } = await start(auth, { link: true }, owner.headers)
-        const ro = await fetchRequestObject(auth, started!)
-        expect((await directPost(auth, ro, { id_token: idTokenFor(alice, ro) })).status).toBe(204)
-        const byOther = await poll(auth, started!, other.headers)
-        expect(byOther.status).toBe(401)
-        expect(await json(byOther)).toMatchObject({ code: 'LINK_SESSION_MISMATCH' })
-        // 結果は消費済みなので、本人がポーリングしても pending (やり直し)
-        expect(await json(await poll(auth, started!, owner.headers))).toEqual({ status: 'pending' })
-
-        // fragment: 別人、または未ログインのブラウザが提示
-        const s2 = (await start(auth, { link: true }, owner.headers)).started!
-        const ro2 = await fetchRequestObject(auth, s2)
-        expect((await exchange(auth, ro2, { id_token: idTokenFor(alice, ro2) }, other.headers)).status).toBe(401)
-        const s3 = (await start(auth, { link: true }, owner.headers)).started!
-        const ro3 = await fetchRequestObject(auth, s3)
-        expect((await exchange(auth, ro3, { id_token: idTokenFor(alice, ro3) })).status).toBe(401)
-
-        // fragment: 本人が提示すれば成立
-        const s4 = (await start(auth, { link: true }, owner.headers)).started!
-        const ro4 = await fetchRequestObject(auth, s4)
-        const byOwner = await exchange(auth, ro4, { id_token: idTokenFor(alice, ro4) }, owner.headers)
-        expect(byOwner.status).toBe(200)
-        expect(await json(byOwner)).toMatchObject({ status: 'ok', user: { id: owner.user.id } })
-        expect(await listAccounts(auth, owner.headers)).toHaveLength(2)
-    })
-
-    it('a logged-in browser signing in (without link) switches to the CCID owner instead of linking', async () => {
+describe('existing users', () => {
+    it('a logged-in browser signing in with another CCID switches to that CCID\'s user instead of linking', async () => {
         const auth = await createTestAuth()
         const owner = await json<{ user: { id: string } }>((await directPostFlow(auth, alice)).polled)
         const other = await signUpUser(auth)
         const { polled } = await directPostFlow(auth, alice, {}, other.headers)
         expect(await json(polled)).toMatchObject({ status: 'ok', user: { id: owner.user.id } })
+        expect(await listAccounts(auth, other.headers)).toHaveLength(1)
+        // 未登録の CCID でも、ログイン中のユーザーに付くのではなく新しいユーザーになる (1 ユーザーに CCID は 1 つ)
+        const fresh = await json<{ user: { id: string }; isNewUser: boolean }>((await directPostFlow(auth, bob, {}, other.headers)).polled)
+        expect(fresh.isNewUser).toBe(true)
+        expect(fresh.user.id).not.toBe(other.user.id)
         expect(await listAccounts(auth, other.headers)).toHaveLength(1)
     })
 

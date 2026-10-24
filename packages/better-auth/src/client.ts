@@ -1,9 +1,8 @@
 // better-auth クライアントプラグイン。
 //   authClient.signIn.concrnt({ callbackURL, onChallenge })   Concrnt でログイン (未登録の CCID はサインアップ)
-//   authClient.concrnt.link({ callbackURL, onChallenge })      ログイン中のユーザーに CCID を追加
 //   authClient.concrnt.pendingSignUp() / concrnt.signUp()      サーバーが signUp: 'confirm' のとき。結果 'signup_required' の後に
 //                                                              確認画面を出し、「作る」なら signUp()。断るなら何も呼ばず次のログインへ
-//   一覧・解除は better-auth 組み込みの authClient.listAccounts() / authClient.unlinkAccount({ accountId })
+//   ログイン中の CCID は better-auth 組み込みの authClient.listAccounts() の providerId 'concrnt' の行
 //
 // 応答方式 (CIP-17 §8) はサーバーに現れない。1 つの要求から QR 用 (directPostUri) と同一端末リンク用 (fragmentUri) の
 // 両方が返るので、onChallenge で QR を描き、同じ端末にアプリがあればリンクへ遷移する。
@@ -62,10 +61,10 @@ type StatusResponse =
     | { status: 'ok'; callbackURL: string; isNewUser: boolean; token: string; user: Record<string, unknown> }
 
 export const getConcrntActions = ($fetch: BetterFetch, $store: ClientStore) => {
-    const run = async (link: boolean, opts: ConcrntFlowOptions): Promise<FlowReturn> => {
+    const run = async (opts: ConcrntFlowOptions): Promise<FlowReturn> => {
         const started = await $fetch<Started>('/concrnt/start', {
             method: 'POST',
-            body: { callbackURL: opts.callbackURL, newUserCallbackURL: opts.newUserCallbackURL, ...(link ? { link: true } : {}) },
+            body: { callbackURL: opts.callbackURL, newUserCallbackURL: opts.newUserCallbackURL },
             ...opts.fetchOptions,
             throw: false
         })
@@ -92,11 +91,7 @@ export const getConcrntActions = ($fetch: BetterFetch, $store: ClientStore) => {
     return {
         signIn: {
             /** CIP-17 でログインする。未登録の CCID はサインアップ (サーバーの disableSignUp で禁止可) */
-            concrnt: (opts: ConcrntFlowOptions = {}) => run(false, opts)
-        },
-        concrnt: {
-            /** ログイン中のユーザーに CCID を追加する。開始したセッションを持つブラウザだけが完了できる */
-            link: (opts: ConcrntFlowOptions = {}) => run(true, opts)
+            concrnt: (opts: ConcrntFlowOptions = {}) => run(opts)
         },
         $Infer: {} as { ConcrntFlowResult: ConcrntFlowResult; ConcrntChallenge: ConcrntChallenge }
     }

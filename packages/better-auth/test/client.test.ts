@@ -2,7 +2,7 @@
 import { createAuthClient } from 'better-auth/client'
 import { describe, expect, it } from 'vitest'
 import { concrntClient, type ConcrntChallenge } from '../src/client.js'
-import { createTestAuth, directPost, fetchRequestObject, idTokenFor, makeIdentity, ORIGIN, requestUriOf, signUpUser, type Started, type TestAuth } from './helpers.js'
+import { createTestAuth, directPost, fetchRequestObject, idTokenFor, makeIdentity, ORIGIN, requestUriOf, type Started, type TestAuth } from './helpers.js'
 
 const alice = makeIdentity()
 
@@ -90,19 +90,5 @@ describe('concrntClient', () => {
         expect(created.data).toMatchObject({ status: 'ok', isNewUser: true })
         expect((await client.getSession()).data?.user.name).toBe('Test User')
         expect((await client.concrnt.pendingSignUp()).data).toEqual({ profile: null })
-    })
-
-    it('concrnt.link requires a session and adds the CCID to that user', async () => {
-        const auth = await createTestAuth()
-        const anon = await createClient(auth).concrnt.link({ onChallenge: () => {} })
-        expect(anon.error?.code).toBe('SESSION_REQUIRED')
-
-        const owner = await signUpUser(auth)
-        const client = createClient(auth, owner.headers.get('cookie')!)
-        const linked = await client.concrnt.link({ pollIntervalMs: 20, onChallenge: (c) => answer(auth, c, (ro) => ({ id_token: idTokenFor(alice, ro) })) })
-        expect(linked.error).toBeNull()
-        expect(linked.data).toMatchObject({ status: 'ok', user: { id: owner.user.id } })
-        const accounts = await client.listAccounts()
-        expect(accounts.data?.map((a) => a.providerId).sort()).toEqual(['concrnt', 'credential'])
     })
 })
