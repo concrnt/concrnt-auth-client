@@ -6,12 +6,8 @@ create table "account" ("id" text not null primary key, "accountId" text not nul
 
 create table "verification" ("id" text not null primary key, "identifier" text not null, "value" text not null, "expiresAt" date not null, "createdAt" date not null, "updatedAt" date not null);
 
-create table "concrntIdentity" ("id" text not null primary key, "userId" text not null references "user" ("id") on delete cascade, "ccid" text not null unique, "domain" text, "name" text, "createdAt" date not null, "updatedAt" date not null);
-
 create index "session_userId_idx" on "session" ("userId");
 
 create index "account_userId_idx" on "account" ("userId");
 
 create index "verification_identifier_idx" on "verification" ("identifier");
-
-create index "concrntIdentity_userId_idx" on "concrntIdentity" ("userId");

@@ -39,7 +39,6 @@
 		"@better-auth/core": "^1.7.12",
 		"@types/node": "^24.19.2",
 		"better-auth": "^1.7.12",
-		"nanostores": "^1.0.1",
 		"oxlint": "^1.81.0",
 		"typescript": "~6.0.2",
 		"vitest": "^4.1.0",

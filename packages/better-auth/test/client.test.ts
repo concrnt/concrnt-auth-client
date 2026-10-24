@@ -1,77 +1,79 @@
-// クライアントプラグイン: createAuthClient の fetch を auth.handler に直結して direct_post の一連を回す
+// クライアントプラグイン: createAuthClient の fetch を auth.handler に直結して別端末フローの一連を回す
 import { createAuthClient } from 'better-auth/client'
 import { describe, expect, it } from 'vitest'
-import { concrntClient } from '../src/client.js'
-import { call, createTestAuth, directPost, directPostFlow, fetchRequestObject, idTokenFor, makeIdentity, ORIGIN, signUpUser, type Started } from './helpers.js'
+import { concrntClient, type ConcrntChallenge } from '../src/client.js'
+import { createTestAuth, directPost, fetchRequestObject, idTokenFor, makeIdentity, ORIGIN, requestUriOf, signUpUser, type Started, type TestAuth } from './helpers.js'
 
 const alice = makeIdentity()
 
-describe('concrntClient', () => {
-    it('signIn.concrnt (direct_post) hands the QR to onChallenge, polls, and resolves ok', async () => {
-        const auth = await createTestAuth()
-        const owner = await signUpUser(auth, 'owner')
-        expect((await directPostFlow(auth, 'registration', alice, {}, owner.headers)).polled.status).toBe(200)
-
-        const client = createAuthClient({
-            baseURL: ORIGIN,
-            plugins: [concrntClient()],
-            fetchOptions: {
-                customFetchImpl: (url, init) => {
-                    const headers = new Headers(init?.headers)
-                    headers.set('origin', ORIGIN)
-                    return auth.handler(new Request(url, { ...init, headers }))
-                }
+const createClient = (auth: TestAuth, cookie?: string) =>
+    createAuthClient({
+        baseURL: ORIGIN,
+        plugins: [concrntClient()],
+        fetchOptions: {
+            customFetchImpl: (url, init) => {
+                const headers = new Headers(init?.headers)
+                headers.set('origin', ORIGIN)
+                if (cookie) headers.set('cookie', cookie)
+                return auth.handler(new Request(url, { ...init, headers }))
             }
-        })
+        }
+    })
 
-        const challenges: unknown[] = []
-        const flow = client.signIn.concrnt({
-            mode: 'direct_post',
+/** Authenticator 役: QR を読んで応答する */
+const answer = (auth: TestAuth, c: ConcrntChallenge, form: (ro: Awaited<ReturnType<typeof fetchRequestObject>>) => Record<string, string>) =>
+    void (async () => {
+        const ro = await fetchRequestObject(auth, { directPostUri: c.directPostUri } as Started)
+        await directPost(auth, ro, form(ro))
+    })()
+
+describe('concrntClient', () => {
+    it('signIn.concrnt hands the QR to onChallenge, polls, and resolves ok with a session', async () => {
+        const auth = await createTestAuth()
+        const client = createClient(auth)
+        const challenges: ConcrntChallenge[] = []
+        const result = await client.signIn.concrnt({
             callbackURL: '/after',
             pollIntervalMs: 20,
             onChallenge: (c) => {
                 challenges.push(c)
-                // Authenticator が QR を読んで応答する
-                void (async () => {
-                    const requestUri = `https://${c.directPostUri.slice('concrnt-auth://direct_post/'.length)}`
-                    const ro = await fetchRequestObject(auth, { requestUri } as Started)
-                    await directPost(auth, ro, { id_token: idTokenFor(alice, ro) })
-                })()
+                answer(auth, c, (ro) => ({ id_token: idTokenFor(alice, ro) }))
             }
         })
-        const result = await flow
         expect(challenges).toHaveLength(1)
         expect(challenges[0]).toMatchObject({ displayCode: expect.stringMatching(/\p{Extended_Pictographic}/u) })
+        expect(requestUriOf({ directPostUri: challenges[0]!.directPostUri } as Started)).toMatch(/^https:\/\/rp\.test\/api\/auth\/concrnt\/request\//)
         expect(result.error).toBeNull()
-        expect(result.data).toMatchObject({ status: 'ok', callbackURL: '/after', data: { user: { id: owner.user.id } } })
+        expect(result.data).toMatchObject({ status: 'ok', callbackURL: '/after', user: { name: 'Test User' } })
     })
 
     it('resolves denied / expired / aborted without throwing', async () => {
         const auth = await createTestAuth()
-        const client = createAuthClient({
-            baseURL: ORIGIN,
-            plugins: [concrntClient()],
-            fetchOptions: { customFetchImpl: (url, init) => auth.handler(new Request(url, { ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), origin: ORIGIN } })) }
-        })
-        const denied = client.signIn.concrnt({
-            pollIntervalMs: 20,
-            onChallenge: (c) => {
-                void (async () => {
-                    const requestUri = `https://${c.directPostUri.slice('concrnt-auth://direct_post/'.length)}`
-                    const ro = await fetchRequestObject(auth, { requestUri } as Started)
-                    await directPost(auth, ro, { error: 'access_denied' })
-                })()
-            }
-        })
-        expect((await denied).data).toEqual({ status: 'denied', callbackURL: '/' })
+        const client = createClient(auth)
+        const denied = await client.signIn.concrnt({ pollIntervalMs: 20, onChallenge: (c) => answer(auth, c, () => ({ error: 'access_denied' })) })
+        expect(denied.data).toEqual({ status: 'denied', callbackURL: '/' })
 
         const ac = new AbortController()
-        const aborted = client.signIn.concrnt({ pollIntervalMs: 20, signal: ac.signal, onChallenge: () => setTimeout(() => ac.abort(), 30) })
-        expect((await aborted).data).toEqual({ status: 'aborted' })
+        const aborted = await client.signIn.concrnt({ pollIntervalMs: 20, signal: ac.signal, onChallenge: () => setTimeout(() => ac.abort(), 30) })
+        expect(aborted.data).toEqual({ status: 'aborted' })
 
-        // 一覧は未ログインなら 401 がエラーとして返る
-        const list = await client.concrnt.listIdentities()
-        expect(list.error?.status).toBe(401)
-        void call
+        // 期限切れは短い TTL の RP で (exp は秒単位なので、最短で即座に切れる)
+        const shortLived = createClient(await createTestAuth({ requestTtl: 1 }))
+        const expired = await shortLived.signIn.concrnt({ pollIntervalMs: 100 })
+        expect(expired.data).toEqual({ status: 'expired' })
+    })
+
+    it('concrnt.link requires a session and adds the CCID to that user', async () => {
+        const auth = await createTestAuth()
+        const anon = await createClient(auth).concrnt.link({ onChallenge: () => {} })
+        expect(anon.error?.code).toBe('SESSION_REQUIRED')
+
+        const owner = await signUpUser(auth)
+        const client = createClient(auth, owner.headers.get('cookie')!)
+        const linked = await client.concrnt.link({ pollIntervalMs: 20, onChallenge: (c) => answer(auth, c, (ro) => ({ id_token: idTokenFor(alice, ro) })) })
+        expect(linked.error).toBeNull()
+        expect(linked.data).toMatchObject({ status: 'ok', user: { id: owner.user.id } })
+        const accounts = await client.listAccounts()
+        expect(accounts.data?.map((a) => a.providerId).sort()).toEqual(['concrnt', 'credential'])
     })
 })

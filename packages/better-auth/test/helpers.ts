@@ -65,7 +65,6 @@ export const cookiesOf = (res: Response): Headers => {
 export const hasSessionCookie = (res: Response): boolean => /better-auth\.session_token=[^;]+;/.test(res.headers.get('set-cookie') ?? '')
 
 export interface Started {
-    requestUri: string
     directPostUri: string
     fragmentUri: string
     displayCode: string
@@ -74,16 +73,17 @@ export interface Started {
 }
 
 /** ブラウザ: 開始 */
-export const start = async (auth: TestAuth, kind: 'authentication' | 'registration', body: Record<string, unknown> = {}, headers?: HeadersInit) => {
-    const res = await call(auth, 'POST', `/concrnt/start-${kind}`, { json: body, headers })
+export const start = async (auth: TestAuth, body: Record<string, unknown> = {}, headers?: HeadersInit) => {
+    const res = await call(auth, 'POST', '/concrnt/start', { json: body, headers })
     return { res, started: (res.ok ? await res.json() : null) as Started | null }
 }
 
-export const challengeOf = (requestUri: string): string => requestUri.slice(requestUri.lastIndexOf('/') + 1)
+export const requestUriOf = (started: Started): string => `https://${started.directPostUri.slice('concrnt-auth://direct_post/'.length)}`
+export const challengeOf = (started: Started): string => started.directPostUri.slice(started.directPostUri.lastIndexOf('/') + 1)
 
 /** Authenticator: Request Object を取りに行く */
 export const fetchRequestObject = async (auth: TestAuth, started: Started): Promise<RequestObject> => {
-    const res = await call(auth, 'GET', started.requestUri, { authenticator: true })
+    const res = await call(auth, 'GET', requestUriOf(started), { authenticator: true })
     if (!res.ok) throw new Error(`request object: ${res.status} ${await res.text()}`)
     return json<RequestObject>(res)
 }
@@ -98,15 +98,15 @@ export const directPost = (auth: TestAuth, ro: RequestObject, form: Record<strin
 
 /** ブラウザ: §8.1 ポーリング */
 export const poll = (auth: TestAuth, started: Started, headers?: HeadersInit): Promise<Response> =>
-    call(auth, 'GET', `/concrnt/status?pollToken=${encodeURIComponent(started.pollToken)}`, { headers })
+    call(auth, 'POST', '/concrnt/status', { json: { pollToken: started.pollToken }, headers })
 
 /** ブラウザ (着地ページ): §8.2 exchange */
 export const exchange = (auth: TestAuth, ro: RequestObject, body: { id_token?: string | null; error?: string | null }, headers?: HeadersInit): Promise<Response> =>
     call(auth, 'POST', ro.redirect_uri.replace('/concrnt/callback/', '/concrnt/exchange/'), { json: body, headers })
 
-/** 別端末フローを最後まで (開始 → RO → direct_post → ポーリング) */
-export const directPostFlow = async (auth: TestAuth, kind: 'authentication' | 'registration', identity: TestIdentity, startBody: Record<string, unknown> = {}, headers?: HeadersInit) => {
-    const { res: startRes, started } = await start(auth, kind, startBody, headers)
+/** 別端末フローを最後まで (開始 → RO → direct_post → ポーリング)。headers は開始とポーリングの両方に付く */
+export const directPostFlow = async (auth: TestAuth, identity: TestIdentity, startBody: Record<string, unknown> = {}, headers?: HeadersInit) => {
+    const { res: startRes, started } = await start(auth, startBody, headers)
     if (!started) throw new Error(`start failed: ${startRes.status} ${await startRes.text()}`)
     const ro = await fetchRequestObject(auth, started)
     const posted = await directPost(auth, ro, { id_token: idTokenFor(identity, ro) })
@@ -127,3 +127,11 @@ export const getSession = async (auth: TestAuth, headers: HeadersInit) => {
     const res = await call(auth, 'GET', '/get-session', { headers })
     return (await res.json()) as { user: { id: string; name: string; email: string; image?: string | null } } | null
 }
+
+export interface AccountRow {
+    id: string
+    providerId: string
+    accountId: string
+}
+
+export const listAccounts = async (auth: TestAuth, headers: HeadersInit): Promise<AccountRow[]> => json<AccountRow[]>(await call(auth, 'GET', '/list-accounts', { headers }))

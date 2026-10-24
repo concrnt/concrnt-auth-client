@@ -2,7 +2,7 @@
 
 [CIP-17 (Sign-In with Concrnt)](https://github.com/concrnt/CIPs) を [better-auth](https://www.better-auth.com) で使う
 RP (Relying Party) のサンプル。プロトコル処理もルーティングもセッションも [`@concrnt/better-auth`](../../packages/better-auth/README.md) と
-better-auth に任せ、ここにあるのは better-auth の組み立て (`worker/auth.ts`) と画面 (`src/App.tsx`) だけ。
+better-auth に任せ、ここにあるのは better-auth の組み立て (`worker/auth.ts`、`plugins: [concrnt()]` だけ) と画面 (`src/App.tsx`) だけ。
 
 Cloudflare Workers (バックエンド・D1) + React (フロント)。
 
@@ -12,8 +12,8 @@ Cloudflare Workers (バックエンド・D1) + React (フロント)。
   ブラウザ (src/App.tsx)                 Worker: better-auth (/api/auth/*)                  Authenticator (world-app)
   ----------------------                 ---------------------------------                  -------------------------
   1. ボタン押下
-     authClient.signIn.concrnt /  -----> POST /api/auth/concrnt/start-authentication|registration
-     authClient.concrnt.addIdentity      要求を発行し、ceremony 行を verification テーブルに保存
+     authClient.signIn.concrnt /  -----> POST /api/auth/concrnt/start
+     authClient.concrnt.link             要求の行を verification テーブルに作り、QR 用とリンク用の URI を返す
   2. onChallenge で QR (direct_post) を描き、同一端末リンク (fragment) へ遷移
 
   --- 別端末 (§8.1 direct_post) — QR ---
@@ -22,9 +22,10 @@ Cloudflare Workers (バックエンド・D1) + React (フロント)。
                                                                                     4. RP の host と display_code を表示して同意を取る
                                                                                     5. master key で ID Token に署名
                                          POST /api/auth/concrnt/callback/:C <------ 6. id_token を direct_post
-                                         検証して預ける → 204 (送信者には何も発行しない)
-  7. (クライアントが自動で) GET /api/auth/concrnt/status?pollToken=
-                                         結果を回収し、ユーザーを引いて (または作って) セッション cookie を発行
+                                         検証し、要求の行を消費して結果を預ける → 204 (送信者には何も発行しない)
+  7. (クライアントが自動で) POST /api/auth/concrnt/status { pollToken }
+                                         結果を取り出し、account (providerId 'concrnt') からユーザーを引いて
+                                         (無ければ作って) セッション cookie を発行
      useSession が更新されてログイン表示
 
   --- 同一端末 (§8.2 fragment) — リンク ---
@@ -35,14 +36,13 @@ Cloudflare Workers (バックエンド・D1) + React (フロント)。
   6'. ログイン表示
 ```
 
-- `worker/auth.ts` — `betterAuth({ database: D1, plugins: [concrnt({...})] })`。Concrnt だけでサインアップできるように
-  `registration.requireSession: false` + `afterVerification` で ID Token のクレームからユーザーを作る (パスキーの passkey-first registration と同じ構成)
+- `worker/auth.ts` — `betterAuth({ database: D1, plugins: [concrnt()] })`。未登録の CCID はそのままサインアップになる
 - `worker/index.ts` — `/api/auth/*` を `auth.handler` に渡すだけ
 - `src/auth-client.ts` — `createAuthClient({ plugins: [concrntClient()] })`
-- `src/App.tsx` — ログイン / 新規登録 / 別の CCID を追加 (QR・照合コード・同一端末リンク・待機)、`useSession`、`useListIdentities` の一覧と改名・解除
-- `migrations/0001_init.sql` — better-auth のテーブルとプラグインの `concrntIdentity`。`pnpm generate-migration` で `auth.cli.ts` から再生成
+- `src/App.tsx` — ログイン (QR・照合コード・同一端末リンク・待機)、`useSession`、紐付いた CCID の一覧 (`listAccounts`) と追加 (`concrnt.link`)・解除 (`unlinkAccount`)、サインアウト
+- `migrations/0001_init.sql` — better-auth の標準テーブルだけ (user / session / account / verification)。プラグイン固有のテーブルは無い。`pnpm generate-migration` で `auth.cli.ts` から再生成
 
-状態は D1 だけ (better-auth の user / session / verification と `concrntIdentity`)。KV も別の secret も要らない。
+状態は D1 だけ。KV も別の secret も要らない。
 
 ## 動かす
 
@@ -74,13 +74,11 @@ RP のオリジン (CIP-17 §5.1) はリクエストのオリジン (`PUBLIC_ORI
 
 ## メモ
 
-- 未登録の CCID で「ログイン」すると `IDENTITY_NOT_FOUND` になる。CCID が登録済みかはログイン前に分からないので、
-  画面はパスキー first の例と同じく「ログイン」と「新規登録」を分けている
+- ログインボタンは 1 つ。CCID が登録済みかどうかはログイン前に分からないが、未登録ならサインアップになるので分ける必要がない
 - ローカル D1 は `database_id` ごとに別ファイル (`.wrangler/state/`) なので、id を差し替えたら `pnpm migrate:local` をやり直す
+- better-auth の `user` には `email` が必須。Concrnt にメールは無いのでプラグインが `<CCID>@concrnt.placeholder.invalid` を入れる
 - `useSession()` は再取得のたびに未ログインだと `isPending` が立つ (`isRefetching` も同時に true)。待機画面を 3 秒ごとに
   再取得しているので、ローディング表示は `isPending && !isRefetching` で初回だけに限っている
-- better-auth の `user` には `email` が必須。Concrnt にメールは無いので `<ccid>@concrnt.invalid` を合成している
-- Authorization Request URI は `concrnt-auth://direct_post/<host>/api/auth/concrnt/request/<C>` で約 115〜130 バイト (host 次第)
-  (basePath の分だけコア直叩きのサンプルより長い)
+- Authorization Request URI は `concrnt-auth://direct_post/<host>/api/auth/concrnt/request/<C>` で約 90〜105 バイト (host 次第)
 - Cloudflare Web Analytics の自動注入 (beacon.min.js) は、fragment の着地ページでは CSP (`script-src 'sha256-…'`) に弾かれて
   コンソールにエラーが出る。着地ページは一瞬で `callbackURL` へ遷移する中継なので動作に影響はない
