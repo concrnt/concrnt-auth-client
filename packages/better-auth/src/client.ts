@@ -25,6 +25,8 @@ export interface ConcrntChallenge {
 export interface ConcrntFlowOptions {
     /** ログイン後に戻る URL (fragment では着地ページがここへ遷移する)。trustedOrigins の範囲内であること。既定 '/' */
     callbackURL?: string | undefined
+    /** 新しいユーザーが作られたときの戻り先 (OAuth の newUserCallbackURL と同じ)。省略時は callbackURL */
+    newUserCallbackURL?: string | undefined
     /** 要求が発行されたときに呼ばれる。QR と displayCode を描き、必要なら fragmentUri へ遷移する */
     onChallenge?: ((challenge: ConcrntChallenge) => void) | undefined
     /** status のポーリング間隔 (ms)。既定 2000 */
@@ -35,7 +37,7 @@ export interface ConcrntFlowOptions {
 }
 
 export type ConcrntFlowResult =
-    | { status: 'ok'; callbackURL: string; token: string; user: Record<string, unknown> }
+    | { status: 'ok'; callbackURL: string; isNewUser: boolean; token: string; user: Record<string, unknown> }
     | { status: 'denied'; callbackURL: string }
     | { status: 'expired' }
     | { status: 'aborted' }
@@ -47,13 +49,16 @@ interface Started extends ConcrntChallenge {
     pollToken: string
 }
 
-type StatusResponse = { status: 'pending' } | { status: 'denied'; callbackURL: string } | { status: 'ok'; callbackURL: string; token: string; user: Record<string, unknown> }
+type StatusResponse =
+    | { status: 'pending' }
+    | { status: 'denied'; callbackURL: string }
+    | { status: 'ok'; callbackURL: string; isNewUser: boolean; token: string; user: Record<string, unknown> }
 
 export const getConcrntActions = ($fetch: BetterFetch, $store: ClientStore) => {
     const run = async (link: boolean, opts: ConcrntFlowOptions): Promise<FlowReturn> => {
         const started = await $fetch<Started>('/concrnt/start', {
             method: 'POST',
-            body: { callbackURL: opts.callbackURL, ...(link ? { link: true } : {}) },
+            body: { callbackURL: opts.callbackURL, newUserCallbackURL: opts.newUserCallbackURL, ...(link ? { link: true } : {}) },
             ...opts.fetchOptions,
             throw: false
         })

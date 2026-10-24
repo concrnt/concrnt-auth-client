@@ -93,11 +93,19 @@ describe('sign-in (direct_post)', () => {
         expect(await json(await poll(auth, started))).toEqual({ status: 'pending' })
     })
 
-    it('signs an existing CCID into the same user', async () => {
+    it('signs an existing CCID into the same user and reports isNewUser / newUserCallbackURL', async () => {
         const auth = await createTestAuth()
-        const first = await json<{ user: { id: string } }>((await directPostFlow(auth, alice)).polled)
-        const second = await json<{ user: { id: string } }>((await directPostFlow(auth, alice)).polled)
+        const first = await json<{ user: { id: string }; isNewUser: boolean; callbackURL: string }>(
+            (await directPostFlow(auth, alice, { callbackURL: '/home', newUserCallbackURL: '/welcome' })).polled
+        )
+        expect(first).toMatchObject({ isNewUser: true, callbackURL: '/welcome' })
+        const second = await json<{ user: { id: string }; isNewUser: boolean; callbackURL: string }>(
+            (await directPostFlow(auth, alice, { callbackURL: '/home', newUserCallbackURL: '/welcome' })).polled
+        )
+        expect(second).toMatchObject({ isNewUser: false, callbackURL: '/home' })
         expect(second.user.id).toBe(first.user.id)
+        // newUserCallbackURL も trustedOrigins で検証される
+        expect((await start(auth, { newUserCallbackURL: 'https://evil.test/x' })).res.status).toBe(403)
     })
 
     it('rejects unknown CCIDs with 403 SIGNUP_DISABLED when disableSignUp is set and creates nothing', async () => {

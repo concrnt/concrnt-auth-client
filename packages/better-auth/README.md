@@ -56,13 +56,15 @@ better-auth の `user` には `email` が必須なので、Concrnt だけで作�
 ```ts
 const { data, error } = await authClient.signIn.concrnt({
     callbackURL: '/',
+    newUserCallbackURL: '/welcome', // 省略可。初めての CCID でユーザーが作られたときの戻り先 (OAuth と同じ)
     onChallenge: ({ directPostUri, fragmentUri, displayCode, exp }) => {
         renderQr(directPostUri)        // 別端末: Authenticator が読む QR
         show(displayCode)              // 同意画面と見比べる絵文字 (§6)
         location.href = fragmentUri    // 同一端末: アプリがあればこれで開く (ユーザー操作の直後に)
     }
 })
-// data.status: 'ok' | 'denied' | 'expired' | 'aborted'。ok なら cookie が入っていて useSession が更新される
+// data.status: 'ok' | 'denied' | 'expired' | 'aborted'。ok なら cookie が入っていて useSession が更新される。
+// data.isNewUser はこのログインでユーザーが作られたかどうか
 
 // ログイン中のユーザーに CCID を追加
 await authClient.concrnt.link({ onChallenge })
@@ -94,14 +96,14 @@ concrnt({
 
 | Method / Path | 役割 |
 |---|---|
-| `POST /concrnt/start` `{ callbackURL?, link? }` | 要求を発行。`{ directPostUri, fragmentUri, displayCode, exp, pollToken }`。`link: true` はセッション必須で、検証した CCID をそのユーザーに紐付ける |
+| `POST /concrnt/start` `{ callbackURL?, newUserCallbackURL?, link? }` | 要求を発行。`{ directPostUri, fragmentUri, displayCode, exp, pollToken }`。新規ユーザーは `newUserCallbackURL` (あれば) に戻る。`link: true` はセッション必須で、検証した CCID をそのユーザーに紐付ける |
 | `GET /concrnt/request/:C` | §5.3 Request Object (Authenticator が取る)。`Access-Control-Allow-Origin: *` |
 | `POST /concrnt/callback/:C` | §8.1 direct_post の受け口。`application/x-www-form-urlencoded` の `id_token` / `error`。検証して結果を預け 204。**送信者にセッションは発行しない** |
 | `GET /concrnt/callback/:C` | §8.2 fragment の着地ページ (HTML) |
 | `POST /concrnt/exchange/:C` `{ id_token?, error? }` | §8.2 提示したブラウザをサインイン/紐付けしてセッションを発行 |
-| `POST /concrnt/status` `{ pollToken }` | §8.1 開始したブラウザが結果を回収。`pending` / `denied` / `ok` (+セッション) |
+| `POST /concrnt/status` `{ pollToken }` | §8.1 開始したブラウザが結果を回収。`pending` / `denied` / `ok` |
 
-`callbackURL` は better-auth の `trustedOrigins` で検証される。
+`ok` の応答は `{ status, callbackURL, isNewUser, token, user }`。`callbackURL` / `newUserCallbackURL` は better-auth の `trustedOrigins` で検証される。
 
 ## 完了時の判定
 

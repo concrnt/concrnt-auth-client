@@ -12,7 +12,7 @@
 //
 //   ブラウザ                              better-auth (basePath 配下)                        Authenticator (world-app)
 //   --------                              ---------------------------                        -------------------------
-//   POST /concrnt/start {callbackURL?, link?}  要求の行を作る。両方の Authorization Request URI と pollToken を返す
+//   POST /concrnt/start {callbackURL?, newUserCallbackURL?, link?}  要求の行を作る。両方の Authorization Request URI と pollToken を返す
 //   QR (direct_post) / リンク (fragment) に
 //                                         GET  /concrnt/request/:C          <----------------- Request Object を取りに来る
 //   --- 別端末 (direct_post, §8.1) ---
@@ -64,6 +64,8 @@ interface PendingRequest {
     nonce: string
     exp: number
     callbackURL: string
+    /** 新規ユーザーが作られたときの戻り先 (OAuth の newUserCallbackURL と同じ)。無ければ callbackURL */
+    newUserCallbackURL?: string | undefined
     /** 開始したブラウザの秘密 pollToken の SHA-256 (base64url)。別端末フローの結果の宛先 */
     pollHash: string
     /** link ceremony: 開始したユーザー。完了時にこのユーザーのセッションを要求する */
@@ -150,9 +152,12 @@ export const concrnt = (options: ConcrntPluginOptions = {}) => {
             throw APIError.from('UNAUTHORIZED', { ...CONCRNT_ERROR_CODES.UNABLE_TO_SIGN_IN, message: result.error || CONCRNT_ERROR_CODES.UNABLE_TO_SIGN_IN.message })
         }
         await setSessionCookie(ctx, result.data)
+        const isNewUser = result.isRegister === true
         return ctx.json({
             status: 'ok' as const,
-            callbackURL: request.callbackURL,
+            callbackURL: (isNewUser && request.newUserCallbackURL) || request.callbackURL,
+            /** この応答で新しいユーザーが作られた (初めての CCID) */
+            isNewUser,
             token: result.data.session.token,
             user: parseUserOutput(ctx.context.options, result.data.user)
         })
@@ -164,14 +169,20 @@ export const concrnt = (options: ConcrntPluginOptions = {}) => {
         '/concrnt/start',
         {
             method: 'POST',
-            // callbackURL は better-auth の origin チェック (全 endpoint 共通) が trustedOrigins で検証する
-            body: z.object({ callbackURL: z.string().max(2048).optional(), link: z.boolean().optional() }).optional(),
+            // callbackURL / newUserCallbackURL は better-auth の origin チェック (全 endpoint 共通) が trustedOrigins で検証する
+            body: z
+                .object({
+                    callbackURL: z.string().max(2048).optional(),
+                    newUserCallbackURL: z.string().max(2048).optional(),
+                    link: z.boolean().optional()
+                })
+                .optional(),
             metadata: {
                 noStore: true,
                 openapi: {
                     operationId: 'startConcrnt',
                     description:
-                        'Start Sign-In with Concrnt (CIP-17). Returns the Authorization Request URIs for QR (direct_post) and link (fragment). With link: true (session required) the verified CCID is linked to the current user instead.'
+                        'Start Sign-In with Concrnt (CIP-17). Returns the Authorization Request URIs for QR (direct_post) and link (fragment). A new user is sent to newUserCallbackURL (if given) instead of callbackURL. With link: true (session required) the verified CCID is linked to the current user instead.'
                 }
             }
         },
@@ -189,6 +200,7 @@ export const concrnt = (options: ConcrntPluginOptions = {}) => {
                 nonce: randomToken(32),
                 exp,
                 callbackURL: ctx.body?.callbackURL ?? '/',
+                newUserCallbackURL: ctx.body?.newUserCallbackURL,
                 pollHash: await sha256(pollToken),
                 linkUserId
             }
