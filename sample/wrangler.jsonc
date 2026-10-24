@@ -1,0 +1,25 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "concrnt-login-sample",
+	"main": "worker/index.ts",
+	"compatibility_date": "2026-10-19",
+	"assets": {
+		"not_found_handling": "single-page-application"
+	},
+	"observability": {
+		"enabled": true
+	},
+	"upload_source_maps": true,
+	// 別端末フローで結果を待ち合わせるメールボックス。成功・拒否のときだけ書き、数分で消える。
+	// 要求やログインセッションは置かない (署名付きトークンで持ち回る)。
+	// 別のアカウントにデプロイするときは `wrangler kv namespace create LOGIN_KV` で作り直して id を差し替える。
+	// ローカル開発 (pnpm dev) ではエミュレートされるので id はそのままでよい。
+	"kv_namespaces": [{ "binding": "LOGIN_KV", "id": "ba236131b90a4351b078901be62144bd" }],
+	// 署名鍵 LOGIN_SECRET は vars ではなく `wrangler secret put LOGIN_SECRET` で与える (ローカルは .dev.vars)。
+	"vars": {
+		// RP のオリジン (CIP-17 §5.1)。request_uri / redirect_uri / ID Token の aud に使う。Authorization Request URI には
+		// host しか載らず https が暗黙なので http では成立しない。空ならリクエストのオリジンを使う。
+		// ローカル開発でトンネル等を使うときは .dev.vars で上書きする。
+		"PUBLIC_ORIGIN": ""
+	}
+}

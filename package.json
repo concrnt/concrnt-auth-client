@@ -1,0 +1,46 @@
+{
+	"name": "@concrnt/auth-client",
+	"version": "0.1.0",
+	"description": "CIP-17 (Sign-In with Concrnt) Relying Party core: authorization request issuance, response handling and ID Token verification",
+	"license": "MIT",
+	"type": "module",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"default": "./dist/index.js"
+		}
+	},
+	"files": [
+		"dist",
+		"README.md"
+	],
+	"sideEffects": false,
+	"scripts": {
+		"build": "tsc -p tsconfig.build.json",
+		"test": "vitest run",
+		"lint": "oxlint",
+		"typecheck": "tsc -p tsconfig.json --noEmit"
+	},
+	"dependencies": {
+		"@noble/curves": "^2.4.0",
+		"@noble/hashes": "^2.4.0",
+		"@scure/base": "^2.4.0"
+	},
+	"devDependencies": {
+		"oxlint": "^1.81.0",
+		"typescript": "~6.0.2",
+		"vitest": "^4.1.0"
+	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/concrnt/concrnt-auth-client"
+	},
+	"keywords": [
+		"concrnt",
+		"cip-17",
+		"authentication",
+		"siop"
+	]
+}

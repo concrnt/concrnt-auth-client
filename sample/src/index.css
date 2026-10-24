@@ -1,0 +1,20 @@
+body {
+    margin: 0;
+    font-family: system-ui, sans-serif;
+    color-scheme: light dark;
+}
+
+main {
+    max-width: 480px;
+    margin: 0 auto;
+    padding: 2rem 1rem;
+    text-align: center;
+}
+
+h1 {
+    font-size: 1.25rem;
+}
+
+code {
+    word-break: break-all;
+}
