@@ -6,7 +6,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { ripemd160 } from '@noble/hashes/legacy.js'
 import { bech32 } from '@scure/base'
 import type { IdTokenClaims } from './types.js'
-import { base64urlDecode, utf8String } from './token.js'
+import { base64urlDecode, utf8String } from './encoding.js'
 
 export interface VerifyIdTokenOptions {
     /** 自身のオリジン (§5.1: scheme://host[:port]、末尾スラッシュ無し)。aud と一致すること */

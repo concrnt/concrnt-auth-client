@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { LANDING_SCRIPT } from '../src/landing.js'
+import { LANDING_SCRIPT } from '@concrnt/auth-client'
 import {
     call,
     challengeOf,
@@ -186,7 +186,7 @@ describe('sign-in (fragment)', () => {
         expect(res.headers.get('cache-control')).toBe('no-store')
         const html = await res.text()
         expect(html).toContain(LANDING_SCRIPT)
-        expect(html).toContain('/exchange/')
+        expect(html).toContain(`data-exchange="https://rp.test/api/auth/concrnt/exchange/${challengeOf(started!)}"`)
         const digest = Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(LANDING_SCRIPT))).toString('base64')
         expect(res.headers.get('content-security-policy')).toContain(`script-src 'sha256-${digest}'`)
         expect(res.headers.get('content-security-policy')).toContain("connect-src 'self'")

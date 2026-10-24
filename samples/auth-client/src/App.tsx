@@ -1,13 +1,12 @@
-// CIP-17 RP のブラウザ側。ログインボタンは 1 つで、押すと両方の経路を同時に始める:
-//   同一端末 (§8.2): concrnt-auth://fragment/… に遷移して同じ端末のアプリを開く。
-//                    アプリが開く /auth/callback/<C>#id_token=… をこのブラウザで受け取り、
-//                    フラグメントの内容をそのまま /api/login/session/<C> に送って、このブラウザがログインする
-//   別端末   (§8.1): アプリが開かなかった場合に備えて concrnt-auth://direct_post/… の QR も表示し、
-//                    応答を Worker 経由でポーリングで待つ
-// どちらの URI も同じ requestUri から作る。応答方式を選ぶのはここ (ブラウザ) で、サーバーは知らない
-import { useEffect, useRef, useState } from 'react'
+// CIP-17 RP のブラウザ側。流れ (開始 → QR / リンク → 応答待ち) は @concrnt/auth-client/browser の runLogin に任せ、
+// ここには fetch の形と画面だけがある。
+//   ログインボタン 1 つで両方の経路を同時に始める:
+//   同一端末 (§8.2): fragmentUri に遷移して同じ端末のアプリを開く。アプリが開く /auth/callback/<C>#id_token=… は
+//                    Worker の着地ページが受け、このブラウザにログイン cookie を発行して / に戻す (フロントの実装は不要)
+//   別端末   (§8.1): アプリが開かなかった場合に備えて directPostUri の QR も表示し、runLogin が status をポーリングして待つ
+import { useEffect, useState } from 'react'
 import QRCode from 'qrcode'
-import { authorizationRequestUri } from '@concrnt/auth-client'
+import { runLogin, type LoginChallenge, type LoginStartResponse } from '@concrnt/auth-client/browser'
 
 interface User {
     ccid: string
@@ -16,152 +15,141 @@ interface User {
     picture?: string
 }
 
-type Phase =
-    | { kind: 'loading' }
-    | { kind: 'loggedOut' }
-    | { kind: 'waiting'; session: string; exp: number; qr: string; displayCode: string }
-    | { kind: 'loggedIn'; user: User }
-    | { kind: 'denied' }
-    | { kind: 'expired' }
-    | { kind: 'failed'; reason: string }
+type Waiting = { qr: string; fragmentUri: string; displayCode: string; exp: number }
+type Notice = { tone: 'info' | 'error'; text: string }
+type StatusResponse = { status: 'pending' } | { status: 'denied' } | { status: 'ok'; user: User }
 
-// サーバーは @concrnt/auth-client の start() の結果をそのまま返す (StartedLogin)
-interface StartResponse {
-    session: string
-    displayCode: string
-    exp: number
-    requestUri: string
+const postJson = async <T,>(url: string, body: unknown): Promise<T> => {
+    const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    if (!res.ok) throw new Error(`${res.status} ${await res.text()}`)
+    return (await res.json()) as T
+}
+
+const fetchMe = async (): Promise<User | null> => {
+    const res = await fetch('/api/me')
+    return res.ok ? ((await res.json()) as User) : null
 }
 
 export default function App() {
-    const [phase, setPhase] = useState<Phase>({ kind: 'loading' })
-    const booted = useRef(false)
+    const [user, setUser] = useState<User | null | undefined>(undefined) // undefined = 初回取得中
+    const [waiting, setWaiting] = useState<Waiting | null>(null)
+    const [abort, setAbort] = useState<AbortController | null>(null)
+    // 着地ページが ?error= を付けて戻してきた場合は初期表示で拾い、URL からは消す
+    const [notice, setNotice] = useState<Notice | null>(() => {
+        const error = new URLSearchParams(location.search).get('error')
+        if (!error) return null
+        history.replaceState(null, '', '/')
+        return { tone: 'error', text: error === 'access_denied' ? 'ログインが拒否されました' : `ログインに失敗しました (${error})` }
+    })
 
     useEffect(() => {
-        if (booted.current) return
-        booted.current = true
-
-        // §8.2: アプリがブラウザで開いた /auth/callback/<C>#id_token=… (拒否時は #error=access_denied)。
-        // どの要求への応答かは URL (C) で決まる
-        const callback = /^\/auth\/callback\/([^/]+)$/.exec(location.pathname)
-        if (callback) {
-            const params = new URLSearchParams(location.hash.slice(1))
-            history.replaceState(null, '', '/') // ID Token を URL に残さない
-            // フラグメントの内容をそのまま送る。検証が通れば、このブラウザにログイン cookie が発行される
-            fetch(`/api/login/session/${callback[1]}`, { method: 'POST', body: params }).then(async (res) => {
-                if (!res.ok) setPhase({ kind: 'failed', reason: await res.text() })
-                else {
-                    const result = await res.json()
-                    if (result.status === 'ok') setPhase({ kind: 'loggedIn', user: result.user })
-                    else setPhase({ kind: 'denied' })
-                }
-            })
-            return
-        }
-
-        // cookie で既にログイン済みか確認する
-        fetch('/api/me').then(async (res) => {
-            setPhase(res.ok ? { kind: 'loggedIn', user: await res.json() } : { kind: 'loggedOut' })
-        })
+        void fetchMe().then(setUser)
     }, [])
 
-    // QR 表示中: ブラウザだけが知る session でポーリングし、結果を受け取る (§8.1)
+    // 待機中: 同一端末フローが別タブで完了していれば cookie が付いているので、このタブも追従して待機を打ち切る
     useEffect(() => {
-        if (phase.kind !== 'waiting') return
+        if (!waiting) return
         const timer = setInterval(async () => {
-            // 同一端末フローが別タブで完了していれば cookie が付いているので、このタブも追従する
-            const me = await fetch('/api/me')
-            if (me.ok) {
-                setPhase({ kind: 'loggedIn', user: await me.json() })
-                return
+            const me = await fetchMe()
+            if (me) {
+                setUser(me)
+                abort?.abort()
             }
-            // サーバーは開始時に何も記録していないので、期限切れはこちらで判断する
-            if (Date.now() / 1000 > phase.exp) {
-                setPhase({ kind: 'expired' })
-                return
-            }
-            const res = await fetch(`/api/login/status?session=${phase.session}`)
-            const result = await res.json()
-            if (result.status === 'ok') setPhase({ kind: 'loggedIn', user: result.user })
-            if (result.status === 'denied') setPhase({ kind: 'denied' })
-        }, 2000)
+        }, 3000)
         return () => clearInterval(timer)
-    }, [phase])
+    }, [waiting, abort])
 
-    // ボタン押下で要求を 1 往復で作り、同じ requestUri から同一端末用 (fragment) と QR 用 (direct_post) の URI を組む。
-    // カスタムスキームへの遷移はユーザー操作の直後 (transient activation の間) でないとブラウザに止められる
     const login = async () => {
-        const res = await fetch('/api/login/start', { method: 'POST' })
-        const start = (await res.json()) as StartResponse
-        location.href = authorizationRequestUri(start.requestUri, 'fragment') // アプリが無い端末では何も起きない
-        const qr = await QRCode.toDataURL(authorizationRequestUri(start.requestUri, 'direct_post'))
-        setPhase({ kind: 'waiting', session: start.session, exp: start.exp, qr, displayCode: start.displayCode })
+        setNotice(null)
+        const ac = new AbortController()
+        setAbort(ac)
+        // 応答方式を選ぶのはここ: QR は direct_post、同一端末で開くリンクは fragment。同じ要求から両方作られる
+        const onChallenge = async (c: LoginChallenge) => {
+            // カスタムスキームへの遷移はユーザー操作の直後でないとブラウザに止められる。アプリが無い端末では何も起きない
+            location.href = c.fragmentUri
+            setWaiting({ qr: await QRCode.toDataURL(c.directPostUri), fragmentUri: c.fragmentUri, displayCode: c.displayCode, exp: c.exp })
+        }
+        try {
+            const result = await runLogin<Exclude<StatusResponse, { status: 'pending' }>>({
+                start: () => postJson<LoginStartResponse>('/api/login/start', {}),
+                poll: (pollToken) => postJson<StatusResponse>('/api/login/status', { pollToken }),
+                onChallenge,
+                signal: ac.signal
+            })
+            switch (result.status) {
+                case 'ok':
+                    setUser(result.user)
+                    break
+                case 'denied':
+                    setNotice({ tone: 'error', text: 'ログインが拒否されました' })
+                    break
+                case 'expired':
+                    setNotice({ tone: 'error', text: 'ログイン要求の有効期限が切れました' })
+                    break
+                case 'aborted':
+                    break
+            }
+        } catch (e) {
+            setNotice({ tone: 'error', text: `ログインに失敗しました (${(e as Error).message})` })
+        } finally {
+            setWaiting(null)
+        }
     }
 
     const logout = async () => {
         await fetch('/api/logout', { method: 'POST' })
-        setPhase({ kind: 'loggedOut' })
+        setUser(null)
     }
 
-    switch (phase.kind) {
-        case 'loading':
-            return <p>読み込み中...</p>
-        case 'loggedOut':
-            return (
-                <main>
-                    <h1>Sign-In with Concrnt サンプル</h1>
-                    <p>
-                        <button onClick={login}>Concrnt でログイン</button>
-                    </p>
-                </main>
-            )
-        case 'waiting':
-            return (
-                <main>
-                    <h1>Concrnt アプリで承認してください</h1>
-                    <p>
-                        <small>アプリが開かなかった場合は、別の端末の Concrnt アプリでこの QR コードを読み取ってください</small>
-                    </p>
-                    <img src={phase.qr} alt="Authorization Request QR" width={256} height={256} />
-                    <p>
-                        照合コード
-                        <br />
-                        <span style={{ fontSize: '2rem' }}>{phase.displayCode}</span>
-                        <br />
-                        <small>アプリの同意画面に同じ絵文字が表示されます</small>
-                    </p>
-                    <p>応答を待っています...</p>
-                </main>
-            )
-        case 'loggedIn':
-            return (
-                <main>
-                    <h1>ログインしました</h1>
-                    {phase.user.picture && <img src={phase.user.picture} alt="" width={64} height={64} />}
-                    <p>{phase.user.name ?? '(名前なし)'}</p>
-                    <p>
-                        <code>{phase.user.ccid}</code>
-                        <br />
-                        <small>@{phase.user.domain}</small>
-                    </p>
-                    <button onClick={logout}>ログアウト</button>
-                </main>
-            )
-        case 'denied':
-        case 'expired':
-        case 'failed':
-            return (
-                <main>
-                    <h1>
-                        {phase.kind === 'denied'
-                            ? 'ログインが拒否されました'
-                            : phase.kind === 'expired'
-                              ? 'ログイン要求の有効期限が切れました'
-                              : 'ログインに失敗しました'}
-                    </h1>
-                    {phase.kind === 'failed' && <p><small>{phase.reason}</small></p>}
-                    <button onClick={() => setPhase({ kind: 'loggedOut' })}>最初に戻る</button>
-                </main>
-            )
+    if (user === undefined) return <p>読み込み中...</p>
+
+    if (waiting) {
+        return (
+            <main>
+                <h1>Concrnt アプリで承認してください</h1>
+                <p>
+                    <small>アプリが開かなかった場合は、別の端末の Concrnt アプリでこの QR コードを読み取ってください</small>
+                </p>
+                <img src={waiting.qr} alt="Authorization Request QR" width={256} height={256} />
+                <p>
+                    照合コード
+                    <br />
+                    <span style={{ fontSize: '2rem' }}>{waiting.displayCode}</span>
+                    <br />
+                    <small>アプリの同意画面に同じ絵文字が表示されます</small>
+                </p>
+                <p>
+                    <a href={waiting.fragmentUri}>この端末のアプリで開く</a>
+                </p>
+                <p>応答を待っています...</p>
+                <button onClick={() => abort?.abort()}>やめる</button>
+            </main>
+        )
     }
+
+    if (!user) {
+        return (
+            <main>
+                <h1>Sign-In with Concrnt サンプル</h1>
+                {notice && <p className={notice.tone}>{notice.text}</p>}
+                <p>
+                    <button onClick={login}>Concrnt でログイン</button>
+                </p>
+            </main>
+        )
+    }
+
+    return (
+        <main>
+            <h1>ログインしました</h1>
+            {user.picture && <img src={user.picture} alt="" width={64} height={64} />}
+            <p>{user.name ?? '(名前なし)'}</p>
+            <p>
+                <code>{user.ccid}</code>
+                <br />
+                <small>@{user.domain}</small>
+            </p>
+            <button onClick={logout}>ログアウト</button>
+        </main>
+    )
 }

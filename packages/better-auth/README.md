@@ -12,8 +12,9 @@ Concrnt の ID Token は「外部で署名された ID Token」なので、bette
 - 未登録の CCID はそのままサインアップになる。`signUp: 'confirm'` で「作りますか?」を挟め、`'disabled'` で既存ユーザーに限定できる
 - 状態は better-auth の `verification` テーブルの行だけ。要求ごとに 1 行を置き、受理時に原子的に消費する
   (CIP-17 §9 手順 3 の nonce 一回限り)。追加のストアや secret は要らない
-- プロトコルの純粋な部分 (ID Token の検証、Authorization Request URI、display_code) は
-  [`@concrnt/auth-client`](../auth-client/README.md) を使う
+- プロトコルの状態機械 (要求の発行・Request Object・応答の受理・一回限り)、着地ページ、ブラウザ側の待ち合わせは
+  [`@concrnt/auth-client`](../auth-client/README.md) のもの。このプラグインは verification テーブルを `AuthStore` に写し、
+  検証済みのクレームを better-auth のユーザー/セッションに結び付ける部分だけを持つ
 
 ## 導入
 

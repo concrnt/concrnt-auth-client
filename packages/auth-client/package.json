@@ -1,7 +1,7 @@
 {
 	"name": "@concrnt/auth-client",
 	"version": "0.1.0",
-	"description": "CIP-17 (Sign-In with Concrnt) Relying Party core: authorization request issuance, response handling and ID Token verification",
+	"description": "CIP-17 (Sign-In with Concrnt) Relying Party core: authorization request issuance, response handling, ID Token verification, fragment landing page and browser flow",
 	"license": "MIT",
 	"type": "module",
 	"main": "dist/index.js",
@@ -10,6 +10,10 @@
 		".": {
 			"types": "./dist/index.d.ts",
 			"default": "./dist/index.js"
+		},
+		"./browser": {
+			"types": "./dist/browser.d.ts",
+			"default": "./dist/browser.js"
 		}
 	},
 	"files": [

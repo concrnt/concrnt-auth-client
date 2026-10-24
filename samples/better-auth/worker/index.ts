@@ -1,6 +1,6 @@
 // CIP-17 (Sign-In with Concrnt) を better-auth で使う RP のサンプル Worker。
 // ルーティングは better-auth に丸ごと任せる: /api/auth/* を auth.handler に渡すだけで、
-// @concrnt/better-auth が /api/auth/concrnt/* (開始・request_uri・redirect_uri・status・exchange・identity 管理) を生やす。
+// @concrnt/better-auth が /api/auth/concrnt/* (開始・request_uri・redirect_uri と着地ページ・status・exchange) を生やす。
 // それ以外のパスは静的アセット (SPA) に落ちる
 import { createAuth } from './auth.js'
 
