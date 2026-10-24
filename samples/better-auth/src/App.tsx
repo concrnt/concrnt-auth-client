@@ -1,16 +1,17 @@
 // CIP-17 RP のブラウザ側 (better-auth 版)。プロトコルの処理は @concrnt/better-auth/client の authClient に任せ、
 // ここには画面だけがある。
 //
-//   ログイン / 新規登録ボタン → authClient.signIn.concrnt / authClient.concrnt.addIdentity
+//   ログインボタン → authClient.signIn.concrnt (未登録の CCID はそのままサインアップ)
+//   「別の CCID を追加」 → authClient.concrnt.link
 //     onChallenge で QR (direct_post) と同一端末リンク (fragment) を受け取り、リンクへ遷移しつつ QR を表示する。
 //     別端末 (§8.1): アプリが QR を読んで応答 → クライアントが status をポーリング → ok で useSession が更新される
 //     同一端末 (§8.2): アプリが redirect_uri#id_token=… を開く → サーバーの着地ページが exchange → callbackURL (/) に戻る
-//   ログイン後: useSession の内容、紐付いた CCID の一覧 (useListIdentities)、追加・改名・解除、サインアウト
+//   ログイン後: useSession の内容、紐付いた CCID の一覧 (listAccounts)、追加・解除 (unlinkAccount)、サインアウト
 import { useEffect, useState } from 'react'
 import QRCode from 'qrcode'
 import { authClient } from './auth-client.js'
 
-type Waiting = { kind: 'register' | 'login' | 'add'; qr: string; fragmentUri: string; displayCode: string; exp: number }
+type Waiting = { kind: 'login' | 'link'; qr: string; fragmentUri: string; displayCode: string; exp: number }
 type Notice = { tone: 'info' | 'error'; text: string }
 
 export default function App() {
@@ -32,9 +33,9 @@ export default function App() {
         return () => clearInterval(timer)
     }, [waiting, refetch])
     useEffect(() => {
-        // ログイン/新規登録の待機中にセッションが現れたら (別タブで同一端末フローが完了)、待機を打ち切る。
+        // ログインの待機中にセッションが現れたら (別タブで同一端末フローが完了)、待機を打ち切る。
         // 中断された run() が待機画面を閉じる。ログイン中の「別の CCID を追加」はセッションがあるのが前提なので対象外
-        if (session && waiting && waiting.kind !== 'add') abort?.abort()
+        if (session && waiting?.kind === 'login') abort?.abort()
     }, [session, waiting, abort])
 
     const run = async (kind: Waiting['kind']) => {
@@ -47,20 +48,11 @@ export default function App() {
             location.href = c.fragmentUri
             setWaiting({ kind, qr: await QRCode.toDataURL(c.directPostUri), fragmentUri: c.fragmentUri, displayCode: c.displayCode, exp: c.exp })
         }
-        const common = { mode: 'direct_post' as const, callbackURL: '/', onChallenge, signal: ac.signal }
-        const result =
-            kind === 'login'
-                ? await authClient.signIn.concrnt(common)
-                : await authClient.concrnt.addIdentity({ ...common, createSession: kind === 'register' })
+        const opts = { callbackURL: '/', onChallenge, signal: ac.signal }
+        const result = kind === 'login' ? await authClient.signIn.concrnt(opts) : await authClient.concrnt.link(opts)
         setWaiting(null)
         if (result.error) {
-            const hint =
-                result.error.code === 'IDENTITY_NOT_FOUND'
-                    ? 'この CCID はまだ登録されていません。「Concrnt で新規登録」から始めてください'
-                    : result.error.code === 'IDENTITY_ALREADY_REGISTERED'
-                      ? 'この CCID は既に登録されています。「Concrnt でログイン」を使ってください'
-                      : `${result.error.code ?? ''} ${result.error.message ?? ''}`
-            setNotice({ tone: 'error', text: hint })
+            setNotice({ tone: 'error', text: `${result.error.code ?? ''} ${result.error.message ?? ''}` })
             return
         }
         switch (result.data.status) {
@@ -71,7 +63,7 @@ export default function App() {
                 setNotice({ tone: 'error', text: 'ログイン要求の有効期限が切れました' })
                 break
             case 'ok':
-                if (kind === 'add') setNotice({ tone: 'info', text: 'CCID を追加しました' })
+                if (kind === 'link') setNotice({ tone: 'info', text: 'CCID を追加しました' })
                 break
         }
     }
@@ -112,7 +104,7 @@ export default function App() {
                     <button onClick={() => run('login')}>Concrnt でログイン</button>
                 </p>
                 <p>
-                    <button onClick={() => run('register')}>Concrnt で新規登録</button>
+                    <small>初めての CCID はそのままアカウントが作られます</small>
                 </p>
             </main>
         )
@@ -125,9 +117,11 @@ export default function App() {
             {session.user.image && <img src={session.user.image} alt="" width={64} height={64} />}
             <p>{session.user.name}</p>
             <p>
-                <small>user id: <code>{session.user.id}</code></small>
+                <small>
+                    user id: <code>{session.user.id}</code>
+                </small>
             </p>
-            <Identities onAdd={() => run('add')} />
+            <Accounts onAdd={() => run('link')} refreshKey={notice} />
             <p>
                 <button onClick={() => authClient.signOut()}>ログアウト</button>
             </p>
@@ -135,35 +129,40 @@ export default function App() {
     )
 }
 
-function Identities({ onAdd }: { onAdd: () => void }) {
-    const { data, isPending, refetch } = authClient.useListIdentities()
-    const rename = async (id: string, current: string | null | undefined) => {
-        const name = prompt('ラベル', current ?? '')
-        if (name === null) return
-        await authClient.concrnt.updateIdentity({ id, name })
-        void refetch()
-    }
-    const remove = async (id: string) => {
+type Account = { id: string; providerId: string; accountId: string }
+
+/** 紐付いた CCID の一覧と解除。better-auth 組み込みの listAccounts / unlinkAccount をそのまま使う */
+function Accounts({ onAdd, refreshKey }: { onAdd: () => void; refreshKey: unknown }) {
+    const [accounts, setAccounts] = useState<Account[] | null>(null)
+    const [version, setVersion] = useState(0)
+    useEffect(() => {
+        let active = true
+        void authClient.listAccounts().then(({ data }) => {
+            if (active) setAccounts((data ?? []).filter((a) => a.providerId === 'concrnt'))
+        })
+        return () => {
+            active = false
+        }
+    }, [refreshKey, version])
+    const remove = async (account: Account) => {
         if (!confirm('この CCID の紐付けを解除しますか?')) return
-        await authClient.concrnt.deleteIdentity({ id })
-        void refetch()
+        // 最後のアカウントは better-auth が解除を拒否する (ログインできなくなるため)
+        const { error } = await authClient.unlinkAccount({ accountId: account.id })
+        if (error) alert(error.message)
+        setVersion((v) => v + 1)
     }
     return (
         <section>
             <h2>紐付いた Concrnt アカウント</h2>
-            {isPending && !data ? (
+            {accounts === null ? (
                 <p>読み込み中...</p>
             ) : (
                 <ul className="identities">
-                    {(data ?? []).map((identity) => (
-                        <li key={identity.id}>
-                            <code>{identity.ccid}</code>
+                    {accounts.map((account) => (
+                        <li key={account.id}>
+                            <code>{account.accountId}</code>
                             <br />
-                            <small>
-                                {identity.name ? `${identity.name} · ` : ''}@{identity.domain ?? '?'}
-                            </small>
-                            <br />
-                            <button onClick={() => rename(identity.id, identity.name)}>改名</button> <button onClick={() => remove(identity.id)}>解除</button>
+                            <button onClick={() => remove(account)}>解除</button>
                         </li>
                     ))}
                 </ul>

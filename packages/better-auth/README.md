@@ -2,19 +2,19 @@
 
 [CIP-17: External Service Authentication (Sign-In with Concrnt)](https://github.com/concrnt/CIPs) を
 [better-auth](https://www.better-auth.com) のプラグインにしたもの。`plugins: [concrnt()]` を足すだけで、
-Concrnt のアプリ (Authenticator) で承認してログインできるようになる。プロトコル処理は
-[`@concrnt/auth-client`](../auth-client/README.md) に任せ、このパッケージは better-auth の endpoint・
-ユーザー/セッション・verification テーブルに結び付ける部分だけを持つ。
+Concrnt のアプリ (Authenticator) で承認してログインできるようになる。
 
-形は公式のパスキープラグイン ([`@better-auth/passkey`](https://www.better-auth.com/docs/plugins/passkey)) に揃えてある:
+Concrnt の ID Token は「外部で署名された ID Token」なので、better-auth が OAuth / Google One Tap で使っている
+サインイン処理 (`handleOAuthUserInfo`) にそのまま渡す。CCID は better-auth 標準の `account` テーブルに
+`providerId: 'concrnt'` / `accountId: <CCID>` として入り、**専用テーブルもマイグレーションも要らない**。
+一覧・解除は better-auth 組み込みの `listAccounts` / `unlinkAccount` で行う。
 
-- Concrnt の CCID はユーザーに紐付く「認証手段」で、専用テーブル `concrntIdentity` に入る (1 ユーザーに複数可)
-- **authentication** (登録済みの CCID でログイン) と **registration** (ユーザーに CCID を追加) の 2 つの ceremony
-- `registration.requireSession` (既定 `true`) / `resolveUser` / `afterVerification`、`authentication.afterVerification`
-- 一覧・改名・解除の endpoint と、クライアント側の `useListIdentities()`
-
-追加のストアや secret は要らない。チャレンジのメールボックスと使用済み記録は better-auth の verification テーブルに置き、
-署名鍵は better-auth の `secret` を使う。
+- 未登録の CCID はそのままサインアップになる (`disableSignUp: true` で既存ユーザーに限定できる)
+- ログイン中のユーザーへの CCID の追加は `link: true` (クライアントの `authClient.concrnt.link()`)
+- 状態は better-auth の `verification` テーブルの行だけ。要求ごとに 1 行を置き、受理時に原子的に消費する
+  (CIP-17 §9 手順 3 の nonce 一回限り)。追加のストアや secret は要らない
+- プロトコルの純粋な部分 (ID Token の検証、Authorization Request URI、display_code) は
+  [`@concrnt/auth-client`](../auth-client/README.md) を使う
 
 ## 導入
 
@@ -33,10 +33,6 @@ export const auth = betterAuth({
 })
 ```
 
-```sh
-npx @better-auth/cli migrate   # concrntIdentity テーブルを追加 (または generate で SQL を出す)
-```
-
 ```ts
 // auth-client.ts (ブラウザ)
 import { createAuthClient } from 'better-auth/react'
@@ -48,94 +44,49 @@ export const authClient = createAuthClient({ plugins: [concrntClient()] })
 RP のオリジン (CIP-17 §5.1) は better-auth の `baseURL` のオリジンになる。Authorization Request URI には host しか載らず
 https が暗黙なので、ローカル開発では https のトンネル等を `baseURL` にする (http では Authenticator から到達できない)。
 
+better-auth の `user` には `email` が必須なので、Concrnt だけで作られたユーザーには到達不能なプレースホルダー
+(`<CCID>@concrnt.placeholder.invalid`、SIWE プラグインと同じ方式) が入る。`name` / `image` は ID Token の
+`name` / `picture` (Authenticator の自己申告、CIP-17 §7.3) から取る。
+
 ## 使い方 (ブラウザ)
 
 応答方式 (CIP-17 §8) を選ぶのはブラウザ側で、サーバーは関知しない。1 つの要求から QR 用 (`direct_post`) と
 同一端末リンク用 (`fragment`) の両方の URI が返るので、両方出しておけば先に応答が返った方でログインが成立する。
 
 ```ts
-// 別端末: QR を描き、応答が届くまで待つ
 const { data, error } = await authClient.signIn.concrnt({
-    mode: 'direct_post',
     callbackURL: '/',
     onChallenge: ({ directPostUri, fragmentUri, displayCode, exp }) => {
-        renderQr(directPostUri)       // Authenticator が読む QR
-        show(displayCode)             // 同意画面と見比べる絵文字 (§6)
-        openAppLink.href = fragmentUri // 同じ端末にアプリがあればこれで開ける
+        renderQr(directPostUri)        // 別端末: Authenticator が読む QR
+        show(displayCode)              // 同意画面と見比べる絵文字 (§6)
+        location.href = fragmentUri    // 同一端末: アプリがあればこれで開く (ユーザー操作の直後に)
     }
 })
 // data.status: 'ok' | 'denied' | 'expired' | 'aborted'。ok なら cookie が入っていて useSession が更新される
 
-// 同一端末: アプリへ遷移する。戻りはサーバーの着地ページが処理して callbackURL へ戻る
-await authClient.signIn.concrnt({ mode: 'fragment', callbackURL: '/' })
+// ログイン中のユーザーに CCID を追加
+await authClient.concrnt.link({ onChallenge })
 
-// ログイン中のユーザーに CCID を追加 (registration)
-await authClient.concrnt.addIdentity({ mode: 'direct_post', name: 'My phone', onChallenge })
-
-// 一覧・改名・解除
-const { data: identities } = authClient.useListIdentities()
-await authClient.concrnt.updateIdentity({ id, name })
-await authClient.concrnt.deleteIdentity({ id })
+// 一覧・解除は better-auth 組み込み
+const { data: accounts } = await authClient.listAccounts() // providerId === 'concrnt' の行が CCID
+await authClient.unlinkAccount({ accountId: account.id })  // 最後のアカウントは解除できない (ログイン不能を防ぐ)
 ```
 
-`fragment` では Authenticator がブラウザで `redirect_uri#id_token=…` を開く。その URL (`/api/auth/concrnt/callback/<C>`) には
-プラグインが小さな着地ページを返し、フラグメントを exchange に送ってから `callbackURL` へ遷移する。
-アプリ側に実装は要らない。拒否や失敗のときは `callbackURL?error=<code>` に戻る。
+- 別端末 (§8.1): クライアントが `status` をポーリングし、結果が届けばそのブラウザにセッションが入る
+- 同一端末 (§8.2): Authenticator が `redirect_uri#id_token=…` を開く。その URL (`/api/auth/concrnt/callback/<C>`) には
+  プラグインが小さな着地ページを返し、フラグメントを `exchange` に送ってから `callbackURL` へ遷移する。
+  アプリ側に実装は要らない。拒否や失敗のときは `callbackURL?error=<code>` に戻る
 
-## Concrnt だけでサインアップさせる
-
-既定では未登録の CCID でのログインは `IDENTITY_NOT_FOUND` (401) になり、ユーザーは作られない (パスキーと同じ)。
-Concrnt をサインアップ手段にするには、パスキーの「passkey-first registration」と同じ構成にする:
-
-```ts
-concrnt({
-    registration: {
-        requireSession: false,
-        afterVerification: async ({ ctx, claims, user }) => {
-            if (user) return // ログイン中のユーザーへの追加はそのまま
-            const created = await ctx.context.internalAdapter.createUser(
-                {
-                    name: claims.name ?? claims.sub,
-                    email: `${claims.sub}@example.invalid`, // better-auth の user には email が必須
-                    emailVerified: false,
-                    image: claims.picture ?? null
-                },
-                { method: 'concrnt' }
-            )
-            return { userId: created.id }
-        }
-    }
-})
-```
-
-```ts
-// ブラウザ: 登録と同時にセッションも作る
-await authClient.concrnt.addIdentity({ createSession: true, onChallenge })
-```
-
-パスキーとの違いは 1 点だけ: `requireSession: false` でセッションも `resolveUser` も無いとき、パスキーは開始時に
-`RESOLVE_USER_REQUIRED` を投げるが、このプラグインは開始を通し、受理時に `afterVerification` が `userId` を返すことを要求する
-(返さなければ `RESOLVED_USER_INVALID`)。CCID とプロフィールクレームを見てからユーザーを作れるようにするため。
-`claims.name` / `claims.picture` は Authenticator の自己申告なので表示用途に留めること (CIP-17 §7.3)。
+`onChallenge` の他に `pollIntervalMs` (既定 2000)、`signal` (中断)、`fetchOptions` を渡せる。
 
 ## オプション
 
 ```ts
 concrnt({
-    origin?: string                 // RP のオリジン。既定は baseURL のオリジン
     clientMetadata?: ClientMetadata // §5.3 client_metadata。既定 { client_name: appName }
+    disableSignUp?: boolean         // 未登録の CCID を拒否する (SIGNUP_DISABLED)。既定 false
     requestTtl?: number             // Request Object の有効期間 (秒)。既定 300
-    clockSkew?: number              // ID Token の iat 判定の許容幅 (秒)。既定 300
-    registration?: {
-        requireSession?: boolean    // 既定 true
-        resolveUser?: ({ ctx, context }) => Awaitable<{ id: string; name?: string }>
-        afterVerification?: ({ ctx, claims, user, context }) => Awaitable<{ userId?: string; name?: string } | void>
-    }
-    authentication?: {
-        afterVerification?: ({ ctx, claims, identity }) => Awaitable<void>
-    }
     landing?: Partial<{ title; working; denied; back }> // fragment 着地ページの文言
-    schema?: InferOptionSchema<typeof schema>           // テーブル/列名の差し替え
 })
 ```
 
@@ -143,35 +94,45 @@ concrnt({
 
 | Method / Path | 役割 |
 |---|---|
-| `POST /concrnt/start-authentication` `{ callbackURL? }` | 要求を発行。`{ requestUri, directPostUri, fragmentUri, displayCode, exp, pollToken }` |
-| `POST /concrnt/start-registration` `{ callbackURL?, name?, context?, createSession? }` | 同上。`requireSession` なら fresh なセッション必須 |
+| `POST /concrnt/start` `{ callbackURL?, link? }` | 要求を発行。`{ directPostUri, fragmentUri, displayCode, exp, pollToken }`。`link: true` はセッション必須で、検証した CCID をそのユーザーに紐付ける |
 | `GET /concrnt/request/:C` | §5.3 Request Object (Authenticator が取る)。`Access-Control-Allow-Origin: *` |
-| `POST /concrnt/callback/:C` | §8.1 direct_post の受け口。`application/x-www-form-urlencoded` の `id_token` / `error`。結果を開始したブラウザのために預け 204。**送信者にセッションは発行しない** |
+| `POST /concrnt/callback/:C` | §8.1 direct_post の受け口。`application/x-www-form-urlencoded` の `id_token` / `error`。検証して結果を預け 204。**送信者にセッションは発行しない** |
 | `GET /concrnt/callback/:C` | §8.2 fragment の着地ページ (HTML) |
-| `POST /concrnt/exchange/:C` `{ id_token?, error? }` | §8.2 提示したブラウザにセッションを発行 |
-| `GET /concrnt/status?pollToken=` | §8.1 開始したブラウザが結果を回収。`pending` / `denied` / `ok` (+セッション) |
-| `GET /concrnt/list-identities` | 自分の identity 一覧 |
-| `POST /concrnt/delete-identity` `{ id }` / `POST /concrnt/update-identity` `{ id, name }` | 所有者のみ |
+| `POST /concrnt/exchange/:C` `{ id_token?, error? }` | §8.2 提示したブラウザをサインイン/紐付けしてセッションを発行 |
+| `POST /concrnt/status` `{ pollToken }` | §8.1 開始したブラウザが結果を回収。`pending` / `denied` / `ok` (+セッション) |
 
 `callbackURL` は better-auth の `trustedOrigins` で検証される。
+
+## 完了時の判定
+
+検証済みの CCID をどう扱うかは、better-auth の OAuth サインインと同じ (`handleOAuthUserInfo`):
+
+| 状況 | 結果 |
+|---|---|
+| `account` に `concrnt` / CCID の行がある | そのユーザーとしてサインイン (提示したブラウザが別のユーザーでログイン中でも切り替わる) |
+| 行が無く、通常のサインイン | ユーザーを作成して行を追加 (`disableSignUp` なら `SIGNUP_DISABLED`) |
+| 行が無く、`link: true` | 開始したユーザーに行を追加。開始したセッションを持つブラウザでしか完了できない (`LINK_SESSION_MISMATCH`) |
+| 行が別のユーザーのもので、`link: true` | 409 (`account_ownership_conflict`) |
+
+`user.create` / `account.create` の databaseHooks や `account.updateAccountOnSignIn` など、better-auth のフックと設定はそのまま効く。
+`account.idToken` には直近の ID Token が入るので、`concrnt_domain` などの自己申告クレームが必要ならそこから読める。
 
 ## 安全性のメモ
 
 - **受け口の役割は固定** (CIP-17 §8): `callback` への POST は預けるだけで、`exchange` は提示したブラウザをログインさせる。
-  他人に fragment リンクを踏ませても、その人が自分でログインするだけで開始した側には何も届かない。
-- **registration の照合** (パスキーと同じ): 開始時のユーザーと、結果を持ってきたブラウザのユーザーが違えば
-  `YOU_ARE_NOT_ALLOWED_TO_REGISTER_THIS_IDENTITY`。さらに fragment 経路では、提示したブラウザが開始したユーザーで
-  ログインしていることを要求する (`SESSION_REQUIRED`)。開始したセッションに他人の応答を結び付けないため (§8.2)。
-- **一回限り** (§9 手順 3): 使用済み記録は `reserveVerificationValue` (主キー衝突による first-writer-wins) で原子的に行い、
-  同じ要求への同時応答は 1 件しか通らない。verification を secondaryStorage だけに置く構成では better-auth 側が拒否するので、
-  DB 必須 (`verification.storeInDatabase`)。
-- 着地ページのスクリプトは固定文字列で、`Content-Security-Policy: script-src 'sha256-…'` を付けて返す。
+  他人に fragment リンクを踏ませても、その人が自分でログインするだけで開始した側には何も届かない
+- **一回限り** (§9 手順 3): 要求の行を `consumeVerificationValue` で原子的に消費するので、同じ要求への同時応答は 1 件しか通らず、
+  QR とリンクのどちらで成立してももう一方は使えない。検証に失敗した応答は消費しない
+- **紐付けの束縛**: `link: true` の完了は、開始したセッションを持つブラウザだけに許す。他人の ID Token を含む fragment リンクを
+  ログイン中のユーザーに踏ませても、その CCID が紐付くことはない
+- **status は POST + JSON**: GET にすると cross-site のトップレベル遷移でセッション cookie が設定できてしまう (login CSRF)。
+  POST + JSON なら better-auth の CSRF モデル (JSON 限定 + cookie 同伴時の Origin 検証) に乗る
+- 着地ページのスクリプトは固定文字列で、`Content-Security-Policy: script-src 'sha256-…'` を付けて返す
 
 ## エラーコード (`$ERROR_CODES`)
 
-`CHALLENGE_NOT_FOUND` (404) · `CHALLENGE_ALREADY_USED` · `MISSING_ID_TOKEN` · `INVALID_ID_TOKEN` · `CEREMONY_NOT_FOUND` ·
-`SESSION_REQUIRED` (401) · `RESOLVED_USER_INVALID` · `YOU_ARE_NOT_ALLOWED_TO_REGISTER_THIS_IDENTITY` (401) ·
-`IDENTITY_NOT_FOUND` (401) · `IDENTITY_ALREADY_REGISTERED` · `USER_NOT_FOUND` · `UNABLE_TO_CREATE_SESSION`
+`CHALLENGE_NOT_FOUND` (404) · `CHALLENGE_ALREADY_USED` · `MISSING_ID_TOKEN` · `INVALID_ID_TOKEN` · `SESSION_REQUIRED` (401) ·
+`LINK_SESSION_MISMATCH` (401) · `SIGNUP_DISABLED` (403) · `UNABLE_TO_SIGN_IN` (401)
 
 ## サンプル
 

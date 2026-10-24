@@ -18,30 +18,8 @@ export const createAuth = (env: Env, origin: string, requestHost: string) =>
             // スキーマは wrangler d1 migrations で適用済みなので、リクエストごとの照合は省く
             database: { validateSchema: false }
         },
-        plugins: [
-            concrnt({
-                clientMetadata: { client_name: 'Concrnt × better-auth Sample' },
-                registration: {
-                    // Concrnt だけでサインアップできるようにする (パスキー first と同じ構成):
-                    // 未ログインで登録を始められ、ID Token の検証後に afterVerification でユーザーを作る
-                    requireSession: false,
-                    afterVerification: async ({ ctx, claims, user }) => {
-                        if (user) return // ログイン中のユーザーに CCID を追加する場合はそのまま
-                        const created = await ctx.context.internalAdapter.createUser(
-                            {
-                                name: claims.name ?? claims.sub,
-                                // better-auth の user には email が必須。Concrnt にメールは無いので CCID から合成する
-                                email: `${claims.sub}@concrnt.invalid`,
-                                emailVerified: false,
-                                image: claims.picture ?? null
-                            },
-                            { method: 'concrnt' }
-                        )
-                        return { userId: created.id }
-                    }
-                }
-            })
-        ]
+        // 未登録の CCID はそのままサインアップになる (disableSignUp: true で既存ユーザーだけに限定できる)
+        plugins: [concrnt()]
     })
 
 export type Auth = ReturnType<typeof createAuth>
