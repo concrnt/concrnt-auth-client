@@ -1,8 +1,3 @@
 # ローカル開発で公開 URL (cloudflared 等) を使うときの上書き。無ければ http://localhost:<port> になるが、
 # Authorization Request URI には host しか載らず https が暗黙なので Authenticator からは到達できない。
 PUBLIC_ORIGIN=https://your-tunnel.example.com
-
-# 要求トークン・ログイントークンの署名と nonce の導出に使う HMAC 鍵。本番は `wrangler secret put LOGIN_SECRET`。
-# 未設定でも http://localhost だけは固定の開発用鍵で動く。
-# 生成例: openssl rand -base64 32
-LOGIN_SECRET=change-me

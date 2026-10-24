@@ -9,11 +9,12 @@
 		"lint": "oxlint",
 		"preview": "pnpm run build && vite preview",
 		"deploy": "pnpm run build && wrangler deploy",
-		"cf-typegen": "wrangler types"
+		"cf-typegen": "wrangler types",
+		"migrate:local": "wrangler d1 migrations apply DB --local",
+		"migrate:remote": "wrangler d1 migrations apply DB --remote"
 	},
 	"dependencies": {
 		"@concrnt/auth-client": "workspace:*",
-		"@noble/hashes": "^2.4.0",
 		"qrcode": "^1.5.4",
 		"react": "^19.2.8",
 		"react-dom": "^19.2.8"

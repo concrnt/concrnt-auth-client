@@ -50,29 +50,24 @@ export interface IdTokenClaims {
     updated_at?: number
 }
 
-/** start() の結果。応答方式には依存しない */
+/** start() の結果。そのままブラウザに返してよい。応答方式には依存しない */
 export interface StartedLogin {
-    /**
-     * ブラウザだけが知る秘密 (§8.1)。QR には載せない。別端末フローの結果の回収 (pollResult) に使う
-     */
-    session: string
+    /** チャレンジ C。request_uri と redirect_uri のパス末尾に載る。秘密ではない */
+    challenge: string
+    /** https://<host>/<requestPath>/<C> */
+    requestUri: string
+    /** QR にする Authorization Request URI (concrnt-auth://direct_post/…)。別端末の Authenticator が読む (§8.1) */
+    directPostUri: string
+    /** 同一端末で開くリンク (concrnt-auth://fragment/…)。同じ端末のアプリが開く (§8.2) */
+    fragmentUri: string
     /** §5.3 display_code。同意画面 (direct_post) と見比べる絵文字 */
     displayCode: string
-    /** 要求の失効時刻 (UNIX 秒)。RP は何も保存しないので、期限切れはブラウザ側がこれで判断する */
+    /** 要求の失効時刻 (UNIX 秒) */
     exp: number
-    /** チャレンジ C。request_uri と redirect_uri のパス末尾に載る */
-    challenge: string
     /**
-     * 要求の識別子 (base64url、22 文字)。C に含まれるので QR を見た人も知る値で、秘密ではない。
-     * 利用側が要求ごとの付帯情報 (開始したユーザーなど) を置くキーに使える。応答側では
-     * ConcrntAuth.requestIdOf(challenge) / requestIdOfSession(session) で同じ値が得られる
+     * 開始したブラウザだけが知る秘密 (§8.1)。QR には載せない。別端末フローの結果の回収 (pollResult) に使う
      */
-    requestId: string
-    /**
-     * https://<host>/<requestPath>/<C>。ブラウザはこれを authorizationRequestUri(requestUri, mode) で
-     * concrnt-auth://<mode>/<host>/<requestPath>/<C> にして QR やリンクに使う (§5.2)
-     */
-    requestUri: string
+    pollToken: string
 }
 
 /**
@@ -84,5 +79,9 @@ export interface AuthorizationResponseParams {
     error?: string | null
 }
 
-/** 検証済みのログイン結果 */
-export type LoginResult = { status: 'ok'; claims: IdTokenClaims } | { status: 'denied' }
+/**
+ * 検証済みのログイン結果。context は start() に渡した要求ごとの付帯情報 (開始したユーザー・戻り先 URL など) がそのまま戻る
+ */
+export type LoginResult<T = undefined> =
+    | { status: 'ok'; claims: IdTokenClaims; idToken: string; context: T }
+    | { status: 'denied'; context: T }

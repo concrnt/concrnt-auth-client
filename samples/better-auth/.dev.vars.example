@@ -2,7 +2,7 @@
 # Authorization Request URI には host しか載らず https が暗黙なので Authenticator からは到達できない。
 PUBLIC_ORIGIN=https://your-tunnel.example.com
 
-# better-auth の secret (セッション cookie の署名、CIP-17 のチャレンジの MAC と nonce の導出)。本番は `wrangler secret put BETTER_AUTH_SECRET`。
+# better-auth の secret (セッション cookie の署名など better-auth 自身が使う。CIP-17 の処理には使わない)。本番は `wrangler secret put BETTER_AUTH_SECRET`。
 # 未設定でも http://localhost だけは固定の開発用鍵で動く。
 # 生成例: openssl rand -base64 32
 BETTER_AUTH_SECRET=change-me
