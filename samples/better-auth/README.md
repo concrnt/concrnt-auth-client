@@ -12,8 +12,8 @@ Cloudflare Workers (バックエンド・D1) + React (フロント)。
   ブラウザ (src/App.tsx)                 Worker: better-auth (/api/auth/*)                  Authenticator (world-app)
   ----------------------                 ---------------------------------                  -------------------------
   1. ボタン押下
-     authClient.signIn.concrnt /  -----> POST /api/auth/concrnt/start
-     authClient.concrnt.link             要求の行を verification テーブルに作り、QR 用とリンク用の URI を返す
+     authClient.signIn.concrnt   -----> POST /api/auth/concrnt/start
+                                         要求の行を verification テーブルに作り、QR 用とリンク用の URI を返す
   2. onChallenge で QR (direct_post) を描き、同一端末リンク (fragment) へ遷移
 
   --- 別端末 (§8.1 direct_post) — QR ---
@@ -24,22 +24,25 @@ Cloudflare Workers (バックエンド・D1) + React (フロント)。
                                          POST /api/auth/concrnt/callback/:C <------ 6. id_token を direct_post
                                          検証し、要求の行を消費して結果を預ける → 204 (送信者には何も発行しない)
   7. (クライアントが自動で) POST /api/auth/concrnt/status { pollToken }
-                                         結果を取り出し、account (providerId 'concrnt') からユーザーを引いて
-                                         (無ければ作って) セッション cookie を発行
+                                         結果を取り出し、account (providerId 'concrnt') からユーザーを引いてセッション cookie を発行
      useSession が更新されてログイン表示
+     未登録の CCID なら signup_required (ユーザーは未作成、保留の cookie だけ) → 「アカウントを作りますか?」
+  8. 「作って続行」 ------------------> POST /api/auth/concrnt/sign-up   保留を消費してユーザーを作り、セッション cookie を発行
+     「別のアカウントを使用」→ 1. へ (新しい start で保留は捨てられる)
 
   --- 同一端末 (§8.2 fragment) — リンク ---
   2'. 遷移 ---------(OS の URL スキーム)----------------------------------------->  3'. request_uri を GET、同意、署名
                                                                                     4'. redirect_uri#id_token=… をブラウザで開く
   5'. GET /api/auth/concrnt/callback/:C  → プラグインの着地ページ (HTML)
       着地ページが POST /api/auth/concrnt/exchange/:C → このブラウザにセッション cookie → callbackURL (/) へ
-  6'. ログイン表示
+      (未登録の CCID なら保留の cookie だけ付けて / へ。ページが GET /api/auth/concrnt/pending-sign-up で気付いて確認画面を出す)
+  6'. ログイン表示 (作成したときは newUserCallbackURL (/?welcome=1) に戻り、案内を出す)
 ```
 
-- `worker/auth.ts` — `betterAuth({ database: D1, plugins: [concrnt()] })`。未登録の CCID はそのままサインアップになる
+- `worker/auth.ts` — `betterAuth({ database: D1, plugins: [concrnt({ signUp: 'confirm' })] })`。未登録の CCID は確認してから作る
 - `worker/index.ts` — `/api/auth/*` を `auth.handler` に渡すだけ
 - `src/auth-client.ts` — `createAuthClient({ plugins: [concrntClient()] })`
-- `src/App.tsx` — ログイン (QR・照合コード・同一端末リンク・待機)、`useSession`、紐付いた CCID の一覧 (`listAccounts`) と追加 (`concrnt.link`)・解除 (`unlinkAccount`)、サインアウト
+- `src/App.tsx` — ログイン (QR・照合コード・同一端末リンク・待機)、「アカウントを作りますか?」(`signup_required` / `pendingSignUp` → `signUp`)、新規ユーザーの案内 (`isNewUser` / `?welcome=1`)、`useSession`、この CCID の表示 (`listAccounts`)、サインアウト。1 ユーザーに CCID は 1 つで、追加・解除の UI は無い
 - `migrations/0001_init.sql` — better-auth の標準テーブルだけ (user / session / account / verification)。プラグイン固有のテーブルは無い。`pnpm generate-migration` で `auth.cli.ts` から再生成
 
 状態は D1 だけ。KV も別の secret も要らない。
@@ -74,7 +77,9 @@ RP のオリジン (CIP-17 §5.1) はリクエストのオリジン (`PUBLIC_ORI
 
 ## メモ
 
-- ログインボタンは 1 つ。CCID が登録済みかどうかはログイン前に分からないが、未登録ならサインアップになるので分ける必要がない
+- ログインボタンは 1 つ。CCID が登録済みかどうかはログイン前に分からないので、未登録だったときに「作りますか?」を聞く
+  (`signUp: 'confirm'`)。Authenticator での承認は 1 回で済み、保留は 10 分で失効する。
+  作られたことは別端末フローなら結果の `isNewUser`、同一端末フローなら `newUserCallbackURL` への戻りで分かり、画面に案内を出す
 - ローカル D1 は `database_id` ごとに別ファイル (`.wrangler/state/`) なので、id を差し替えたら `pnpm migrate:local` をやり直す
 - better-auth の `user` には `email` が必須。Concrnt にメールは無いのでプラグインが `<CCID>@concrnt.placeholder.invalid` を入れる
 - `useSession()` は再取得のたびに未ログインだと `isPending` が立つ (`isRefetching` も同時に true)。待機画面を 3 秒ごとに

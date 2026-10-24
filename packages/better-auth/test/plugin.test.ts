@@ -93,15 +93,23 @@ describe('sign-in (direct_post)', () => {
         expect(await json(await poll(auth, started))).toEqual({ status: 'pending' })
     })
 
-    it('signs an existing CCID into the same user', async () => {
+    it('signs an existing CCID into the same user and reports isNewUser / newUserCallbackURL', async () => {
         const auth = await createTestAuth()
-        const first = await json<{ user: { id: string } }>((await directPostFlow(auth, alice)).polled)
-        const second = await json<{ user: { id: string } }>((await directPostFlow(auth, alice)).polled)
+        const first = await json<{ user: { id: string }; isNewUser: boolean; callbackURL: string }>(
+            (await directPostFlow(auth, alice, { callbackURL: '/home', newUserCallbackURL: '/welcome' })).polled
+        )
+        expect(first).toMatchObject({ isNewUser: true, callbackURL: '/welcome' })
+        const second = await json<{ user: { id: string }; isNewUser: boolean; callbackURL: string }>(
+            (await directPostFlow(auth, alice, { callbackURL: '/home', newUserCallbackURL: '/welcome' })).polled
+        )
+        expect(second).toMatchObject({ isNewUser: false, callbackURL: '/home' })
         expect(second.user.id).toBe(first.user.id)
+        // newUserCallbackURL も trustedOrigins で検証される
+        expect((await start(auth, { newUserCallbackURL: 'https://evil.test/x' })).res.status).toBe(403)
     })
 
-    it('rejects unknown CCIDs with 403 SIGNUP_DISABLED when disableSignUp is set and creates nothing', async () => {
-        const auth = await createTestAuth({ disableSignUp: true })
+    it("rejects unknown CCIDs with 403 SIGNUP_DISABLED when signUp is 'disabled' and creates nothing", async () => {
+        const auth = await createTestAuth({ signUp: 'disabled' })
         const { polled } = await directPostFlow(auth, bob)
         expect(polled.status).toBe(403)
         expect(await json(polled)).toMatchObject({ code: 'SIGNUP_DISABLED' })
@@ -198,8 +206,8 @@ describe('sign-in (fragment)', () => {
         expect(await json(await poll(auth, started!))).toEqual({ status: 'pending' })
     })
 
-    it('exchange reports denied and honours disableSignUp', async () => {
-        const auth = await createTestAuth({ disableSignUp: true })
+    it("exchange reports denied and honours signUp: 'disabled'", async () => {
+        const auth = await createTestAuth({ signUp: 'disabled' })
         const { started } = await start(auth)
         const ro = await fetchRequestObject(auth, started!)
         const denied = await exchange(auth, ro, { error: 'access_denied' })
@@ -212,69 +220,83 @@ describe('sign-in (fragment)', () => {
     })
 })
 
-describe('link', () => {
-    it('requires a session to start and links the CCID to that user as a second account', async () => {
-        const auth = await createTestAuth()
-        const anon = await start(auth, { link: true })
-        expect(anon.res.status).toBe(401)
-        expect(await json(anon.res)).toMatchObject({ code: 'SESSION_REQUIRED' })
+describe("signUp: 'confirm'", () => {
+    const pendingCookieOf = (res: Response): string | undefined => res.headers.getSetCookie().find((c) => c.includes('concrnt_signup=') && !/concrnt_signup=;/.test(c))
 
-        const owner = await signUpUser(auth)
-        const { polled } = await directPostFlow(auth, alice, { link: true }, owner.headers)
+    it('holds an unknown CCID instead of creating it, and creates it on sign-up (direct_post)', async () => {
+        const auth = await createTestAuth({ signUp: 'confirm' })
+        const { polled } = await directPostFlow(auth, alice, { callbackURL: '/home', newUserCallbackURL: '/welcome' })
         expect(polled.status).toBe(200)
-        expect(await json(polled)).toMatchObject({ status: 'ok', user: { id: owner.user.id } })
-        const accounts = await listAccounts(auth, owner.headers)
-        expect(accounts.map((a) => a.providerId).sort()).toEqual(['concrnt', 'credential'])
+        expect(hasSessionCookie(polled)).toBe(false)
+        expect(pendingCookieOf(polled)).toMatch(/HttpOnly/)
+        expect(await json(polled)).toEqual({
+            status: 'signup_required',
+            callbackURL: '/home',
+            profile: { ccid: alice.ccid, name: 'Test User', picture: 'https://example.com/avatar.png' }
+        })
+        const browser = cookiesOf(polled)
 
-        // 紐付けた CCID でログインすると同じユーザー
+        // 確認画面用: cookie があれば profile、無ければ null
+        expect(await json(await call(auth, 'GET', '/concrnt/pending-sign-up', { headers: browser }))).toMatchObject({ profile: { ccid: alice.ccid } })
+        expect(await json(await call(auth, 'GET', '/concrnt/pending-sign-up'))).toEqual({ profile: null })
+        // 断った (何も呼ばない) 時点ではユーザーは無い
+        expect((await call(auth, 'POST', '/concrnt/sign-up')).status).toBe(400)
+
+        // 作る
+        const created = await call(auth, 'POST', '/concrnt/sign-up', { headers: browser })
+        expect(created.status).toBe(200)
+        expect(hasSessionCookie(created)).toBe(true)
+        expect(await json(created)).toMatchObject({ status: 'ok', isNewUser: true, callbackURL: '/welcome', user: { name: 'Test User' } })
+        expect(created.headers.getSetCookie().some((c) => /concrnt_signup=;/.test(c) && /Max-Age=0/.test(c))).toBe(true)
+        expect(await listAccounts(auth, cookiesOf(created))).toMatchObject([{ providerId: 'concrnt', accountId: alice.ccid }])
+
+        // 保留は 1 回限り
+        const again = await call(auth, 'POST', '/concrnt/sign-up', { headers: browser })
+        expect(again.status).toBe(400)
+        expect(await json(again)).toMatchObject({ code: 'NO_PENDING_SIGNUP' })
+
+        // 登録済みになった CCID は確認なしでログインできる
         const login = await directPostFlow(auth, alice)
-        expect(await json(login.polled)).toMatchObject({ status: 'ok', user: { id: owner.user.id } })
-
-        // 紐付け済みの CCID を別のユーザーに紐付けようとすると CONFLICT
-        const other = await signUpUser(auth)
-        const conflict = await directPostFlow(auth, alice, { link: true }, other.headers)
-        expect(conflict.polled.status).toBe(409)
-        expect(await listAccounts(auth, other.headers)).toHaveLength(1)
+        expect(await json(login.polled)).toMatchObject({ status: 'ok', isNewUser: false })
     })
 
-    it('refuses to complete a link for a different or missing session, on either route', async () => {
-        const auth = await createTestAuth()
-        const owner = await signUpUser(auth)
-        const other = await signUpUser(auth)
-
-        // direct_post: 別人のセッション、または無セッションでポーリング
-        const { started } = await start(auth, { link: true }, owner.headers)
+    it('holds on the fragment route too, and a new login discards the pending sign-up', async () => {
+        const auth = await createTestAuth({ signUp: 'confirm' })
+        const { started } = await start(auth)
         const ro = await fetchRequestObject(auth, started!)
-        expect((await directPost(auth, ro, { id_token: idTokenFor(alice, ro) })).status).toBe(204)
-        const byOther = await poll(auth, started!, other.headers)
-        expect(byOther.status).toBe(401)
-        expect(await json(byOther)).toMatchObject({ code: 'LINK_SESSION_MISMATCH' })
-        // 結果は消費済みなので、本人がポーリングしても pending (やり直し)
-        expect(await json(await poll(auth, started!, owner.headers))).toEqual({ status: 'pending' })
+        const res = await exchange(auth, ro, { id_token: idTokenFor(bob, ro) })
+        expect(await json(res)).toMatchObject({ status: 'signup_required', profile: { ccid: bob.ccid } })
+        expect(hasSessionCookie(res)).toBe(false)
+        const browser = cookiesOf(res)
+        expect(await json(await call(auth, 'GET', '/concrnt/pending-sign-up', { headers: browser }))).toMatchObject({ profile: { ccid: bob.ccid } })
 
-        // fragment: 別人、または未ログインのブラウザが提示
-        const s2 = (await start(auth, { link: true }, owner.headers)).started!
-        const ro2 = await fetchRequestObject(auth, s2)
-        expect((await exchange(auth, ro2, { id_token: idTokenFor(alice, ro2) }, other.headers)).status).toBe(401)
-        const s3 = (await start(auth, { link: true }, owner.headers)).started!
-        const ro3 = await fetchRequestObject(auth, s3)
-        expect((await exchange(auth, ro3, { id_token: idTokenFor(alice, ro3) })).status).toBe(401)
-
-        // fragment: 本人が提示すれば成立
-        const s4 = (await start(auth, { link: true }, owner.headers)).started!
-        const ro4 = await fetchRequestObject(auth, s4)
-        const byOwner = await exchange(auth, ro4, { id_token: idTokenFor(alice, ro4) }, owner.headers)
-        expect(byOwner.status).toBe(200)
-        expect(await json(byOwner)).toMatchObject({ status: 'ok', user: { id: owner.user.id } })
-        expect(await listAccounts(auth, owner.headers)).toHaveLength(2)
+        // 「別のアカウントを使用」= 新しいログインを始める。cookie は消され、その後の sign-up は通らない
+        const restarted = await start(auth, {}, browser)
+        expect(restarted.res.headers.getSetCookie().some((c) => /concrnt_signup=;/.test(c))).toBe(true)
+        const stale = await call(auth, 'POST', '/concrnt/sign-up', { headers: cookiesOf(restarted.res) })
+        expect(stale.status).toBe(400)
     })
 
-    it('a logged-in browser signing in (without link) switches to the CCID owner instead of linking', async () => {
+    it('sign-up without a pending cookie is rejected', async () => {
+        const auth = await createTestAuth({ signUp: 'confirm' })
+        const res = await call(auth, 'POST', '/concrnt/sign-up')
+        expect(res.status).toBe(400)
+        expect(await json(res)).toMatchObject({ code: 'NO_PENDING_SIGNUP' })
+    })
+})
+
+describe('existing users', () => {
+    it('a logged-in browser signing in with another CCID switches to that CCID\'s user instead of linking', async () => {
         const auth = await createTestAuth()
         const owner = await json<{ user: { id: string } }>((await directPostFlow(auth, alice)).polled)
         const other = await signUpUser(auth)
         const { polled } = await directPostFlow(auth, alice, {}, other.headers)
         expect(await json(polled)).toMatchObject({ status: 'ok', user: { id: owner.user.id } })
+        expect(await listAccounts(auth, other.headers)).toHaveLength(1)
+        // 未登録の CCID でも、ログイン中のユーザーに付くのではなく新しいユーザーになる (1 ユーザーに CCID は 1 つ)
+        const fresh = await json<{ user: { id: string }; isNewUser: boolean }>((await directPostFlow(auth, bob, {}, other.headers)).polled)
+        expect(fresh.isNewUser).toBe(true)
+        expect(fresh.user.id).not.toBe(other.user.id)
         expect(await listAccounts(auth, other.headers)).toHaveLength(1)
     })
 

@@ -1,7 +1,8 @@
 // better-auth クライアントプラグイン。
 //   authClient.signIn.concrnt({ callbackURL, onChallenge })   Concrnt でログイン (未登録の CCID はサインアップ)
-//   authClient.concrnt.link({ callbackURL, onChallenge })      ログイン中のユーザーに CCID を追加
-//   一覧・解除は better-auth 組み込みの authClient.listAccounts() / authClient.unlinkAccount({ accountId })
+//   authClient.concrnt.pendingSignUp() / concrnt.signUp()      サーバーが signUp: 'confirm' のとき。結果 'signup_required' の後に
+//                                                              確認画面を出し、「作る」なら signUp()。断るなら何も呼ばず次のログインへ
+//   ログイン中の CCID は better-auth 組み込みの authClient.listAccounts() の providerId 'concrnt' の行
 //
 // 応答方式 (CIP-17 §8) はサーバーに現れない。1 つの要求から QR 用 (directPostUri) と同一端末リンク用 (fragmentUri) の
 // 両方が返るので、onChallenge で QR を描き、同じ端末にアプリがあればリンクへ遷移する。
@@ -9,7 +10,9 @@
 //   同一端末 (§8.2): サーバーの着地ページが exchange まで済ませて callbackURL に戻す。戻ったときには cookie が入っている
 import type { BetterAuthClientPlugin, ClientStore } from '@better-auth/core'
 import type { BetterFetch, BetterFetchOption } from 'better-auth/client'
-import type { concrnt } from './index.js'
+import type { concrnt, PendingProfile } from './index.js'
+
+export type { PendingProfile }
 
 export interface ConcrntChallenge {
     /** QR にする Authorization Request URI (concrnt-auth://direct_post/…) */
@@ -25,6 +28,8 @@ export interface ConcrntChallenge {
 export interface ConcrntFlowOptions {
     /** ログイン後に戻る URL (fragment では着地ページがここへ遷移する)。trustedOrigins の範囲内であること。既定 '/' */
     callbackURL?: string | undefined
+    /** 新しいユーザーが作られたときの戻り先 (OAuth の newUserCallbackURL と同じ)。省略時は callbackURL */
+    newUserCallbackURL?: string | undefined
     /** 要求が発行されたときに呼ばれる。QR と displayCode を描き、必要なら fragmentUri へ遷移する */
     onChallenge?: ((challenge: ConcrntChallenge) => void) | undefined
     /** status のポーリング間隔 (ms)。既定 2000 */
@@ -35,7 +40,9 @@ export interface ConcrntFlowOptions {
 }
 
 export type ConcrntFlowResult =
-    | { status: 'ok'; callbackURL: string; token: string; user: Record<string, unknown> }
+    | { status: 'ok'; callbackURL: string; isNewUser: boolean; token: string; user: Record<string, unknown> }
+    /** サーバーが signUp: 'confirm' で、未登録の CCID だった。concrnt.signUp() で作る */
+    | { status: 'signup_required'; callbackURL: string; profile: PendingProfile }
     | { status: 'denied'; callbackURL: string }
     | { status: 'expired' }
     | { status: 'aborted' }
@@ -47,13 +54,17 @@ interface Started extends ConcrntChallenge {
     pollToken: string
 }
 
-type StatusResponse = { status: 'pending' } | { status: 'denied'; callbackURL: string } | { status: 'ok'; callbackURL: string; token: string; user: Record<string, unknown> }
+type StatusResponse =
+    | { status: 'pending' }
+    | { status: 'denied'; callbackURL: string }
+    | { status: 'signup_required'; callbackURL: string; profile: PendingProfile }
+    | { status: 'ok'; callbackURL: string; isNewUser: boolean; token: string; user: Record<string, unknown> }
 
 export const getConcrntActions = ($fetch: BetterFetch, $store: ClientStore) => {
-    const run = async (link: boolean, opts: ConcrntFlowOptions): Promise<FlowReturn> => {
+    const run = async (opts: ConcrntFlowOptions): Promise<FlowReturn> => {
         const started = await $fetch<Started>('/concrnt/start', {
             method: 'POST',
-            body: { callbackURL: opts.callbackURL, ...(link ? { link: true } : {}) },
+            body: { callbackURL: opts.callbackURL, newUserCallbackURL: opts.newUserCallbackURL },
             ...opts.fetchOptions,
             throw: false
         })
@@ -72,7 +83,7 @@ export const getConcrntActions = ($fetch: BetterFetch, $store: ClientStore) => {
                 $store.notify('$sessionSignal')
                 return { data: res.data, error: null }
             }
-            if (res.data?.status === 'denied') return { data: res.data, error: null }
+            if (res.data?.status === 'denied' || res.data?.status === 'signup_required') return { data: res.data, error: null }
             await sleep(interval, opts.signal)
         }
     }
@@ -80,11 +91,7 @@ export const getConcrntActions = ($fetch: BetterFetch, $store: ClientStore) => {
     return {
         signIn: {
             /** CIP-17 でログインする。未登録の CCID はサインアップ (サーバーの disableSignUp で禁止可) */
-            concrnt: (opts: ConcrntFlowOptions = {}) => run(false, opts)
-        },
-        concrnt: {
-            /** ログイン中のユーザーに CCID を追加する。開始したセッションを持つブラウザだけが完了できる */
-            link: (opts: ConcrntFlowOptions = {}) => run(true, opts)
+            concrnt: (opts: ConcrntFlowOptions = {}) => run(opts)
         },
         $Infer: {} as { ConcrntFlowResult: ConcrntFlowResult; ConcrntChallenge: ConcrntChallenge }
     }
@@ -110,6 +117,10 @@ export const concrntClient = () =>
         getActions: ($fetch, $store) => getConcrntActions($fetch, $store),
         pathMethods: {
             '/concrnt/start': 'POST',
-            '/concrnt/status': 'POST'
-        }
+            '/concrnt/status': 'POST',
+            '/concrnt/sign-up': 'POST',
+            '/concrnt/pending-sign-up': 'GET'
+        },
+        // concrnt.signUp() はセッションを作るので useSession を更新する (pendingSignUp / signUp 自体はサーバー endpoint から推論される)
+        atomListeners: [{ matcher: (path) => path === '/concrnt/sign-up', signal: '$sessionSignal' }]
     }) satisfies BetterAuthClientPlugin

@@ -2,7 +2,7 @@
 import { createAuthClient } from 'better-auth/client'
 import { describe, expect, it } from 'vitest'
 import { concrntClient, type ConcrntChallenge } from '../src/client.js'
-import { createTestAuth, directPost, fetchRequestObject, idTokenFor, makeIdentity, ORIGIN, requestUriOf, signUpUser, type Started, type TestAuth } from './helpers.js'
+import { createTestAuth, directPost, fetchRequestObject, idTokenFor, makeIdentity, ORIGIN, requestUriOf, type Started, type TestAuth } from './helpers.js'
 
 const alice = makeIdentity()
 
@@ -63,17 +63,32 @@ describe('concrntClient', () => {
         expect(expired.data).toEqual({ status: 'expired' })
     })
 
-    it('concrnt.link requires a session and adds the CCID to that user', async () => {
-        const auth = await createTestAuth()
-        const anon = await createClient(auth).concrnt.link({ onChallenge: () => {} })
-        expect(anon.error?.code).toBe('SESSION_REQUIRED')
-
-        const owner = await signUpUser(auth)
-        const client = createClient(auth, owner.headers.get('cookie')!)
-        const linked = await client.concrnt.link({ pollIntervalMs: 20, onChallenge: (c) => answer(auth, c, (ro) => ({ id_token: idTokenFor(alice, ro) })) })
-        expect(linked.error).toBeNull()
-        expect(linked.data).toMatchObject({ status: 'ok', user: { id: owner.user.id } })
-        const accounts = await client.listAccounts()
-        expect(accounts.data?.map((a) => a.providerId).sort()).toEqual(['concrnt', 'credential'])
+    it("signIn.concrnt resolves signup_required under signUp: 'confirm', and concrnt.signUp() creates the user", async () => {
+        const auth = await createTestAuth({ signUp: 'confirm' })
+        // customFetchImpl で cookie を持ち回る簡易ブラウザ
+        let jar = ''
+        const client = createAuthClient({
+            baseURL: ORIGIN,
+            plugins: [concrntClient()],
+            fetchOptions: {
+                customFetchImpl: async (url, init) => {
+                    const headers = new Headers(init?.headers)
+                    headers.set('origin', ORIGIN)
+                    if (jar) headers.set('cookie', jar)
+                    const res = await auth.handler(new Request(url, { ...init, headers }))
+                    const pairs = res.headers.getSetCookie().map((line) => line.split(';')[0]!.trim())
+                    if (pairs.length) jar = pairs.filter((kv) => !/=$/.test(kv)).join('; ')
+                    return res
+                }
+            }
+        })
+        const held = await client.signIn.concrnt({ pollIntervalMs: 20, onChallenge: (c) => answer(auth, c, (ro) => ({ id_token: idTokenFor(alice, ro) })) })
+        expect(held.data).toMatchObject({ status: 'signup_required', profile: { ccid: alice.ccid, name: 'Test User' } })
+        expect((await client.concrnt.pendingSignUp()).data).toMatchObject({ profile: { ccid: alice.ccid } })
+        const created = await client.concrnt.signUp()
+        expect(created.error).toBeNull()
+        expect(created.data).toMatchObject({ status: 'ok', isNewUser: true })
+        expect((await client.getSession()).data?.user.name).toBe('Test User')
+        expect((await client.concrnt.pendingSignUp()).data).toEqual({ profile: null })
     })
 })

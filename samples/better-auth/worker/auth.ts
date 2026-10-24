@@ -18,8 +18,8 @@ export const createAuth = (env: Env, origin: string, requestHost: string) =>
             // スキーマは wrangler d1 migrations で適用済みなので、リクエストごとの照合は省く
             database: { validateSchema: false }
         },
-        // 未登録の CCID はそのままサインアップになる (disableSignUp: true で既存ユーザーだけに限定できる)
-        plugins: [concrnt()]
+        // 未登録の CCID は勝手に作らず、ブラウザで「アカウントを作りますか?」を確認してから作る ('auto' なら即作成、'disabled' なら拒否)
+        plugins: [concrnt({ signUp: 'confirm' })]
     })
 
 export type Auth = ReturnType<typeof createAuth>
