@@ -5,12 +5,15 @@
 //     onChallenge で QR (direct_post) と同一端末リンク (fragment) を受け取り、リンクへ遷移しつつ QR を表示する。
 //     別端末 (§8.1): アプリが QR を読んで応答 → クライアントが status をポーリング → ok で useSession が更新される
 //     同一端末 (§8.2): アプリが redirect_uri#id_token=… を開く → サーバーの着地ページが exchange → callbackURL (/) に戻る
-//   初めての CCID: サーバーが自動でユーザーを作る。別端末フローでは結果の isNewUser、同一端末フローでは
-//     newUserCallbackURL (/?welcome=1) への戻りで分かるので、「作成しました」の案内を出す
+//   初めての CCID (サーバーは signUp: 'confirm'): ユーザーは作られず結果が signup_required になる。
+//     別端末フローでは結果の profile、同一端末フローでは着地ページから戻ったあと concrnt.pendingSignUp() で分かる。
+//     「作って続行」→ concrnt.signUp() (再承認なし)、「別のアカウントを使用」→ 新しいログインを始める (保留は捨てられる)
+//     作成後は isNewUser (別端末) か newUserCallbackURL (/?welcome=1) への戻りで「作成しました」の案内を出す
 //   ログイン後: useSession の内容、この CCID (listAccounts の concrnt 行)、サインアウト。1 ユーザーに CCID は 1 つ
 import { useEffect, useState } from 'react'
 import QRCode from 'qrcode'
 import { authClient } from './auth-client.js'
+import type { PendingProfile } from '@concrnt/better-auth/client'
 
 type Waiting = { qr: string; fragmentUri: string; displayCode: string; exp: number }
 type Notice = { tone: 'info' | 'error'; text: string }
@@ -31,6 +34,20 @@ export default function App() {
         return { tone: 'error', text: error === 'access_denied' ? 'ログインが拒否されました' : `ログインに失敗しました (${error})` }
     })
     const [abort, setAbort] = useState<AbortController | null>(null)
+    // 検証済みだがまだユーザーになっていない CCID (確認画面)。undefined は未確認
+    const [pending, setPending] = useState<PendingProfile | null | undefined>(undefined)
+
+    // 未ログインなら、同一端末フローの着地から戻ってきた直後に保留中のサインアップがあるかを見る
+    useEffect(() => {
+        if (session || isPending) return
+        let active = true
+        void authClient.concrnt.pendingSignUp().then(({ data }) => {
+            if (active) setPending(data?.profile ?? null)
+        })
+        return () => {
+            active = false
+        }
+    }, [session, isPending])
 
     // 待機中: 同一端末フローが別タブ/別ブラウザで完了していれば cookie が付いているので、このタブも追従する
     useEffect(() => {
@@ -45,6 +62,7 @@ export default function App() {
 
     const login = async () => {
         setNotice(null)
+        setPending(null) // 新しいログインを始めると、サーバー側でも前回の保留は捨てられる
         const ac = new AbortController()
         setAbort(ac)
         const result = await authClient.signIn.concrnt({
@@ -70,10 +88,23 @@ export default function App() {
             case 'expired':
                 setNotice({ tone: 'error', text: 'ログイン要求の有効期限が切れました' })
                 break
+            case 'signup_required':
+                setPending(result.data.profile)
+                break
             case 'ok':
                 if (result.data.isNewUser) setNotice(WELCOME)
                 break
         }
+    }
+
+    const createAccount = async () => {
+        const { data, error } = await authClient.concrnt.signUp()
+        setPending(null)
+        if (error) {
+            setNotice({ tone: 'error', text: `${error.code ?? ''} ${error.message ?? ''}` })
+            return
+        }
+        if (data.isNewUser) setNotice(WELCOME)
     }
 
     // ローディング表示は初回取得だけ。再取得中 (isRefetching) は未ログインでも isPending が立つので、待機画面がチラつかないよう除く
@@ -103,6 +134,28 @@ export default function App() {
         )
     }
 
+    if (!session && pending) {
+        return (
+            <main>
+                <h1>アカウントを作りますか?</h1>
+                <p>この CCID はまだこのサービスに登録されていません。</p>
+                {pending.picture && <img src={pending.picture} alt="" width={64} height={64} />}
+                <p>{pending.name ?? pending.ccid}</p>
+                <p>
+                    <small>
+                        <code>{pending.ccid}</code>
+                    </small>
+                </p>
+                <p>
+                    <button onClick={() => void createAccount()}>作って続行</button>
+                </p>
+                <p>
+                    <button onClick={() => void login()}>別のアカウントを使用</button>
+                </p>
+            </main>
+        )
+    }
+
     if (!session) {
         return (
             <main>
@@ -112,7 +165,7 @@ export default function App() {
                     <button onClick={() => void login()}>Concrnt でログイン</button>
                 </p>
                 <p>
-                    <small>初めての CCID はそのままアカウントが作られます</small>
+                    <small>初めての CCID は、確認のうえでアカウントが作られます</small>
                 </p>
             </main>
         )

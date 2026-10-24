@@ -3,7 +3,8 @@
 // 設計の要点:
 //   - Concrnt の ID Token は「外部で署名された ID Token」なので、better-auth が OAuth / One Tap で使っている
 //     handleOAuthUserInfo にそのまま渡す。account 行 (providerId 'concrnt', accountId = CCID) があればサインイン、
-//     無ければサインアップ (disableSignUp で禁止可)、link ceremony なら開始したユーザーへの紐付け。専用テーブルは持たない
+//     無ければサインアップ (signUp: 'confirm' なら確認を挟む、'disabled' なら拒否)、link ceremony なら開始したユーザーへの紐付け。
+//     専用テーブルは持たない
 //   - ceremony は 1 種類。ログインと紐付けの違いは「開始時にセッションがあり link: true だったか」だけ
 //   - 状態は better-auth の verification テーブルの行だけ。要求ごとに 1 行 (`concrnt-auth:request:<C>`) を置き、
 //     受理時に原子的に消費する (= CIP-17 §9 手順 3 の nonce 一回限り)。別端末フローの結果は
@@ -21,6 +22,11 @@
 //   --- 同一端末 (fragment, §8.2) ---
 //   /concrnt/callback/:C#id_token=… -----> GET は着地ページ (HTML) を返す
 //   POST /concrnt/exchange/:C -----------> 検証し、要求の行を消費して、このブラウザのためにサインイン/紐付け
+//   --- 未登録の CCID で signUp: 'confirm' のとき ---
+//   (status / exchange が) ユーザーを作らず、検証済みの内容を保留行に置き、その id を署名付き cookie に入れて
+//                                         { status: 'signup_required', profile } を返す
+//   GET  /concrnt/pending-sign-up -------> cookie の保留行から profile を返す (確認画面用)
+//   POST /concrnt/sign-up ---------------> 保留行を消費してユーザーを作り、セッションを発行する。断るなら何も呼ばない
 // 型は better-auth のルートから取る (better-call 由来の endpoint 型を宣言ファイルで名付けられるようにするため)
 import type { BetterAuthPlugin, GenericEndpointContext } from 'better-auth'
 import { createAuthEndpoint } from '@better-auth/core/api'
@@ -44,10 +50,13 @@ export interface ConcrntPluginOptions {
     /** §5.3 client_metadata。同意画面に表示される。既定は `{ client_name: appName }` */
     clientMetadata?: ClientMetadata | undefined
     /**
-     * 未登録の CCID でのログインを拒否する (サインアップさせない)。既定 false。
-     * true のとき、未登録の CCID は SIGNUP_DISABLED (403)。登録済みユーザーへの追加は link ceremony で行う
+     * 未登録の CCID でログインされたときの扱い。既定 'auto'
+     * - 'auto': その場でユーザーを作ってログインする
+     * - 'confirm': ユーザーを作らず `{ status: 'signup_required', profile }` を返す。ブラウザが確認を取り、
+     *   POST /concrnt/sign-up で作る (再承認は不要。保留は 10 分で失効する)
+     * - 'disabled': SIGNUP_DISABLED (403)。登録済みユーザーへの追加は link ceremony で行う
      */
-    disableSignUp?: boolean | undefined
+    signUp?: 'auto' | 'confirm' | 'disabled' | undefined
     /** Request Object の有効期間 (秒)。既定 300 */
     requestTtl?: number | undefined
     /** fragment 着地ページ (GET /concrnt/callback/:C) の文言 */
@@ -56,8 +65,13 @@ export interface ConcrntPluginOptions {
 
 const REQUEST_PREFIX = 'concrnt-auth:request:'
 const RESULT_PREFIX = 'concrnt-auth:result:'
+const SIGNUP_PREFIX = 'concrnt-auth:signup:'
 /** 別端末フローの結果を、要求の失効後も回収できる猶予 (秒) */
 const RESULT_GRACE = 60
+/** signUp: 'confirm' の保留の有効期間 (秒) */
+const SIGNUP_TTL = 600
+/** 保留中のサインアップの id を入れる cookie (better-auth の prefix と属性が付く) */
+const SIGNUP_COOKIE = 'concrnt_signup'
 
 /** 要求ごとの行 (`concrnt-auth:request:<C>`)。受理時に消費される */
 interface PendingRequest {
@@ -82,6 +96,7 @@ interface Outcome {
 
 export const concrnt = (options: ConcrntPluginOptions = {}) => {
     const requestTtl = options.requestTtl ?? 300
+    const signUp = options.signUp ?? 'auto'
     const landingTexts: LandingTexts = { ...DEFAULT_LANDING_TEXTS, ...options.landing }
 
     // --- URL ---
@@ -122,14 +137,57 @@ export const concrnt = (options: ConcrntPluginOptions = {}) => {
 
     /**
      * 受理済みの応答で、呼び出し元のブラウザのためにサインイン / サインアップ / 紐付けを行い、セッションを発行する。
-     * 判定は better-auth の handleOAuthUserInfo (OAuth / One Tap と同じもの) に任せる
+     * 未登録の CCID は signUp に従う ('confirm' ならここでは作らず保留にする)
      */
-    const complete = async (ctx: GenericEndpointContext, { request, idToken, claims }: Outcome) => {
+    const complete = async (ctx: GenericEndpointContext, outcome: Outcome) => {
+        const { request, idToken, claims } = outcome
         if (!claims || !idToken) return ctx.json({ status: 'denied' as const, callbackURL: request.callbackURL })
         if (request.linkUserId) {
             const current = await getSessionFromCtx(ctx)
             if (!current || current.user.id !== request.linkUserId) throw APIError.from('UNAUTHORIZED', CONCRNT_ERROR_CODES.LINK_SESSION_MISMATCH)
+        } else if (signUp !== 'auto') {
+            const existing = await ctx.context.internalAdapter.findAccountByKey({ providerId: CONCRNT_PROVIDER_ID, accountId: claims.sub })
+            if (!existing) {
+                if (signUp === 'disabled') throw APIError.from('FORBIDDEN', CONCRNT_ERROR_CODES.SIGNUP_DISABLED)
+                return holdSignUp(ctx, outcome)
+            }
         }
+        return signIn(ctx, { ...outcome, idToken, claims })
+    }
+
+    /** signUp: 'confirm': 検証済みの内容を保留行に置き、その id を署名付き cookie に入れる。ユーザーはまだ作らない */
+    const holdSignUp = async (ctx: GenericEndpointContext, outcome: Outcome) => {
+        const id = randomToken(32)
+        await ctx.context.internalAdapter.createVerificationValue({
+            identifier: SIGNUP_PREFIX + id,
+            value: JSON.stringify(outcome),
+            expiresAt: new Date(Date.now() + SIGNUP_TTL * 1000)
+        })
+        const cookie = ctx.context.createAuthCookie(SIGNUP_COOKIE, { maxAge: SIGNUP_TTL })
+        await ctx.setSignedCookie(cookie.name, id, ctx.context.secret, cookie.attributes)
+        return ctx.json({ status: 'signup_required' as const, callbackURL: outcome.request.callbackURL, profile: profileOf(outcome) })
+    }
+
+    /** 保留中のサインアップの行 (cookie から)。無ければ null */
+    const findPendingSignUp = async (ctx: GenericEndpointContext): Promise<{ id: string; outcome: Outcome } | null> => {
+        const cookie = ctx.context.createAuthCookie(SIGNUP_COOKIE)
+        const id = await ctx.getSignedCookie(cookie.name, ctx.context.secret)
+        if (!id) return null
+        const row = await ctx.context.internalAdapter.findVerificationValue(SIGNUP_PREFIX + id)
+        if (!row || row.expiresAt.getTime() <= Date.now()) return null
+        return { id, outcome: JSON.parse(row.value) as Outcome }
+    }
+
+    const clearPendingSignUp = (ctx: GenericEndpointContext): void => {
+        const cookie = ctx.context.createAuthCookie(SIGNUP_COOKIE)
+        ctx.setCookie(cookie.name, '', { ...cookie.attributes, maxAge: 0 })
+    }
+
+    /**
+     * サインイン / サインアップ / 紐付けを行い、セッションを発行する。
+     * 判定は better-auth の handleOAuthUserInfo (OAuth / One Tap と同じもの) に任せる
+     */
+    const signIn = async (ctx: GenericEndpointContext, { request, idToken, claims }: Outcome & { idToken: string; claims: IdTokenClaims }) => {
         const ccid = claims.sub
         const result = await handleOAuthUserInfo(ctx, {
             userInfo: {
@@ -143,7 +201,7 @@ export const concrnt = (options: ConcrntPluginOptions = {}) => {
             },
             account: { providerId: CONCRNT_PROVIDER_ID, accountId: ccid, idToken, scope: 'openid,profile' },
             callbackURL: request.callbackURL,
-            disableSignUp: options.disableSignUp,
+            disableSignUp: signUp === 'disabled',
             // link ceremony: 開始したユーザーに紐付ける。CCID が別のユーザーのものなら better-auth が CONFLICT を返す
             selectedUser: request.linkUserId ? { userId: request.linkUserId, profile: 'preserve' } : undefined
         })
@@ -193,6 +251,8 @@ export const concrnt = (options: ConcrntPluginOptions = {}) => {
                 if (!session) throw APIError.from('UNAUTHORIZED', CONCRNT_ERROR_CODES.SESSION_REQUIRED)
                 linkUserId = session.user.id
             }
+            // 新しいログインを始めたら、前回の保留中のサインアップ (signUp: 'confirm') は捨てる
+            clearPendingSignUp(ctx)
             const challenge = randomToken(16)
             const pollToken = randomToken(32)
             const exp = Math.floor(Date.now() / 1000) + requestTtl
@@ -336,6 +396,49 @@ export const concrnt = (options: ConcrntPluginOptions = {}) => {
         }
     )
 
+    const pendingSignUp = createAuthEndpoint(
+        '/concrnt/pending-sign-up',
+        {
+            method: 'GET',
+            requireHeaders: true,
+            metadata: {
+                noStore: true,
+                openapi: {
+                    operationId: 'getConcrntPendingSignUp',
+                    description: "signUp: 'confirm': the verified but not yet created identity held for this browser, or null."
+                }
+            }
+        },
+        async (ctx) => {
+            const pending = await findPendingSignUp(ctx)
+            return ctx.json({ profile: pending ? profileOf(pending.outcome) : null })
+        }
+    )
+
+    const confirmSignUp = createAuthEndpoint(
+        '/concrnt/sign-up',
+        {
+            method: 'POST',
+            requireHeaders: true,
+            metadata: {
+                noStore: true,
+                openapi: {
+                    operationId: 'concrntSignUp',
+                    description: "signUp: 'confirm': create the user for the identity held for this browser and issue a session. One-shot."
+                }
+            }
+        },
+        async (ctx) => {
+            const pending = await findPendingSignUp(ctx)
+            const row = pending ? await ctx.context.internalAdapter.consumeVerificationValue(SIGNUP_PREFIX + pending.id) : null
+            if (!row) throw APIError.from('BAD_REQUEST', CONCRNT_ERROR_CODES.NO_PENDING_SIGNUP)
+            clearPendingSignUp(ctx)
+            const outcome = JSON.parse(row.value) as Outcome
+            if (!outcome.claims || !outcome.idToken) throw APIError.from('BAD_REQUEST', CONCRNT_ERROR_CODES.NO_PENDING_SIGNUP)
+            return signIn(ctx, { ...outcome, claims: outcome.claims, idToken: outcome.idToken })
+        }
+    )
+
     return {
         id: 'concrnt',
         endpoints: {
@@ -344,11 +447,14 @@ export const concrnt = (options: ConcrntPluginOptions = {}) => {
             concrntDirectPost: receiveDirectPost,
             concrntFragmentLanding: landing,
             concrntExchange: exchange,
-            concrntStatus: status
+            concrntStatus: status,
+            getConcrntPendingSignUp: pendingSignUp,
+            concrntSignUp: confirmSignUp
         },
         rateLimit: [
             { pathMatcher: (path) => path === '/concrnt/start', window: 60, max: 30 },
-            { pathMatcher: (path) => path === '/concrnt/status', window: 60, max: 120 }
+            { pathMatcher: (path) => path === '/concrnt/status', window: 60, max: 120 },
+            { pathMatcher: (path) => path === '/concrnt/sign-up', window: 60, max: 30 }
         ],
         $ERROR_CODES: CONCRNT_ERROR_CODES,
         options
@@ -356,6 +462,15 @@ export const concrnt = (options: ConcrntPluginOptions = {}) => {
 }
 
 export type ConcrntPlugin = ReturnType<typeof concrnt>
+
+/** 確認画面に出す、検証済みだがまだユーザーになっていない identity。name / picture は Authenticator の自己申告 */
+export interface PendingProfile {
+    ccid: string
+    name: string | null
+    picture: string | null
+}
+
+const profileOf = ({ claims }: Outcome): PendingProfile => ({ ccid: claims!.sub, name: claims!.name ?? null, picture: claims!.picture ?? null })
 
 const randomToken = (bytes: number): string => base64url(crypto.getRandomValues(new Uint8Array(bytes)))
 

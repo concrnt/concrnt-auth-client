@@ -11,8 +11,10 @@ export const CONCRNT_ERROR_CODES = defineErrorCodes({
     SESSION_REQUIRED: 'Session required',
     /** 紐付けの ceremony は、開始したセッションを持つブラウザだけが完了できる */
     LINK_SESSION_MISMATCH: 'This link request must be completed by the session that started it',
-    /** disableSignUp のとき、未登録の CCID ではログインできない */
+    /** signUp: 'disabled' のとき、未登録の CCID ではログインできない */
     SIGNUP_DISABLED: 'Sign-up with Concrnt is disabled',
+    /** signUp: 'confirm': このブラウザに保留中のサインアップが無い (期限切れ・使用済み・別のログインを始めた) */
+    NO_PENDING_SIGNUP: 'No pending sign-up for this browser',
     /** better-auth のサインイン/紐付け処理が失敗した (message に理由) */
     UNABLE_TO_SIGN_IN: 'Unable to sign in'
 })

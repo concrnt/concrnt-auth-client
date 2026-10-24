@@ -108,8 +108,8 @@ describe('sign-in (direct_post)', () => {
         expect((await start(auth, { newUserCallbackURL: 'https://evil.test/x' })).res.status).toBe(403)
     })
 
-    it('rejects unknown CCIDs with 403 SIGNUP_DISABLED when disableSignUp is set and creates nothing', async () => {
-        const auth = await createTestAuth({ disableSignUp: true })
+    it("rejects unknown CCIDs with 403 SIGNUP_DISABLED when signUp is 'disabled' and creates nothing", async () => {
+        const auth = await createTestAuth({ signUp: 'disabled' })
         const { polled } = await directPostFlow(auth, bob)
         expect(polled.status).toBe(403)
         expect(await json(polled)).toMatchObject({ code: 'SIGNUP_DISABLED' })
@@ -206,8 +206,8 @@ describe('sign-in (fragment)', () => {
         expect(await json(await poll(auth, started!))).toEqual({ status: 'pending' })
     })
 
-    it('exchange reports denied and honours disableSignUp', async () => {
-        const auth = await createTestAuth({ disableSignUp: true })
+    it("exchange reports denied and honours signUp: 'disabled'", async () => {
+        const auth = await createTestAuth({ signUp: 'disabled' })
         const { started } = await start(auth)
         const ro = await fetchRequestObject(auth, started!)
         const denied = await exchange(auth, ro, { error: 'access_denied' })
@@ -217,6 +217,74 @@ describe('sign-in (fragment)', () => {
         const unknown = await exchange(auth, ro2, { id_token: idTokenFor(bob, ro2) })
         expect(unknown.status).toBe(403)
         expect(await json(unknown)).toMatchObject({ code: 'SIGNUP_DISABLED' })
+    })
+})
+
+describe("signUp: 'confirm'", () => {
+    const pendingCookieOf = (res: Response): string | undefined => res.headers.getSetCookie().find((c) => c.includes('concrnt_signup=') && !/concrnt_signup=;/.test(c))
+
+    it('holds an unknown CCID instead of creating it, and creates it on sign-up (direct_post)', async () => {
+        const auth = await createTestAuth({ signUp: 'confirm' })
+        const { polled } = await directPostFlow(auth, alice, { callbackURL: '/home', newUserCallbackURL: '/welcome' })
+        expect(polled.status).toBe(200)
+        expect(hasSessionCookie(polled)).toBe(false)
+        expect(pendingCookieOf(polled)).toMatch(/HttpOnly/)
+        expect(await json(polled)).toEqual({
+            status: 'signup_required',
+            callbackURL: '/home',
+            profile: { ccid: alice.ccid, name: 'Test User', picture: 'https://example.com/avatar.png' }
+        })
+        const browser = cookiesOf(polled)
+
+        // 確認画面用: cookie があれば profile、無ければ null
+        expect(await json(await call(auth, 'GET', '/concrnt/pending-sign-up', { headers: browser }))).toMatchObject({ profile: { ccid: alice.ccid } })
+        expect(await json(await call(auth, 'GET', '/concrnt/pending-sign-up'))).toEqual({ profile: null })
+        // 断った (何も呼ばない) 時点ではユーザーは無い
+        expect((await call(auth, 'POST', '/concrnt/sign-up')).status).toBe(400)
+
+        // 作る
+        const created = await call(auth, 'POST', '/concrnt/sign-up', { headers: browser })
+        expect(created.status).toBe(200)
+        expect(hasSessionCookie(created)).toBe(true)
+        expect(await json(created)).toMatchObject({ status: 'ok', isNewUser: true, callbackURL: '/welcome', user: { name: 'Test User' } })
+        expect(created.headers.getSetCookie().some((c) => /concrnt_signup=;/.test(c) && /Max-Age=0/.test(c))).toBe(true)
+        expect(await listAccounts(auth, cookiesOf(created))).toMatchObject([{ providerId: 'concrnt', accountId: alice.ccid }])
+
+        // 保留は 1 回限り
+        const again = await call(auth, 'POST', '/concrnt/sign-up', { headers: browser })
+        expect(again.status).toBe(400)
+        expect(await json(again)).toMatchObject({ code: 'NO_PENDING_SIGNUP' })
+
+        // 登録済みになった CCID は確認なしでログインできる
+        const login = await directPostFlow(auth, alice)
+        expect(await json(login.polled)).toMatchObject({ status: 'ok', isNewUser: false })
+    })
+
+    it('holds on the fragment route too, and a new login discards the pending sign-up', async () => {
+        const auth = await createTestAuth({ signUp: 'confirm' })
+        const { started } = await start(auth)
+        const ro = await fetchRequestObject(auth, started!)
+        const res = await exchange(auth, ro, { id_token: idTokenFor(bob, ro) })
+        expect(await json(res)).toMatchObject({ status: 'signup_required', profile: { ccid: bob.ccid } })
+        expect(hasSessionCookie(res)).toBe(false)
+        const browser = cookiesOf(res)
+        expect(await json(await call(auth, 'GET', '/concrnt/pending-sign-up', { headers: browser }))).toMatchObject({ profile: { ccid: bob.ccid } })
+
+        // 「別のアカウントを使用」= 新しいログインを始める。cookie は消され、その後の sign-up は通らない
+        const restarted = await start(auth, {}, browser)
+        expect(restarted.res.headers.getSetCookie().some((c) => /concrnt_signup=;/.test(c))).toBe(true)
+        const stale = await call(auth, 'POST', '/concrnt/sign-up', { headers: cookiesOf(restarted.res) })
+        expect(stale.status).toBe(400)
+    })
+
+    it('does not interfere with link, and sign-up without a cookie is rejected', async () => {
+        const auth = await createTestAuth({ signUp: 'confirm' })
+        const owner = await signUpUser(auth)
+        const { polled } = await directPostFlow(auth, alice, { link: true }, owner.headers)
+        expect(await json(polled)).toMatchObject({ status: 'ok', user: { id: owner.user.id } })
+        const res = await call(auth, 'POST', '/concrnt/sign-up')
+        expect(res.status).toBe(400)
+        expect(await json(res)).toMatchObject({ code: 'NO_PENDING_SIGNUP' })
     })
 })
 
