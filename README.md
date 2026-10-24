@@ -51,10 +51,10 @@ app.post('/api/login/start', (c) => c.json(auth.start()))
 // 3. request_uri (GET https://rp.example/auth/request/<C>): Request Object を返す。CORS * が必要
 app.get('/auth/request/:challenge', (c) => c.json(auth.getRequestObject(c.params.challenge)))
 
-// 4. redirect_uri (POST https://rp.example/auth/callback): 別端末の Authenticator が direct_post してくる。
-//    検証して「開始した人のため」に預かるだけ。送信者には何も発行しない
-app.post('/auth/callback', async (c) => {
-    await auth.receiveDirectPost(parseAuthorizationResponse(await c.req.formData()))
+// 4. redirect_uri (POST https://rp.example/auth/callback/<C>): 別端末の Authenticator が direct_post してくる。
+//    どの要求への応答かは URL の C で決まる。検証して「開始した人のため」に預かるだけ。送信者には何も発行しない
+app.post('/auth/callback/:challenge', async (c) => {
+    await auth.receiveDirectPost(c.params.challenge, parseAuthorizationResponse(await c.req.formData()))
     return c.body(null, 204)
 })
 
@@ -65,10 +65,10 @@ app.get('/api/login/status', async (c) => {
     return result.status === 'ok' ? login(c, result.claims) : c.json({ status: 'denied' })
 })
 
-// 6. 同一端末フロー: redirect_uri#id_token=… で開かれたブラウザが、フラグメントの内容をそのまま送ってくる。
+// 6. 同一端末フロー: redirect_uri#id_token=… で開かれたブラウザが、開かれた URL の C とフラグメントの内容をそのまま送ってくる。
 //    検証して、送ってきたブラウザにセッションを発行する。メールボックスには触らない
-app.post('/api/login/session', async (c) => {
-    const result = await auth.exchange(parseAuthorizationResponse(await c.req.formData()))
+app.post('/api/login/session/:challenge', async (c) => {
+    const result = await auth.exchange(c.params.challenge, parseAuthorizationResponse(await c.req.formData()))
     return result.status === 'ok' ? login(c, result.claims) : c.json({ status: 'denied' })
 })
 
@@ -88,8 +88,8 @@ app.onError((e, c) => (e instanceof AuthError ? c.text(e.message, e.status) : c.
    無ければ何も起きない)、`authorizationRequestUri(requestUri, 'direct_post')` を QR にして `displayCode` と一緒に表示する。
    先に応答が返った方でログインが成立する。カスタムスキームへの遷移はユーザー操作の直後でないとブラウザに止められる
 2. `session` でポーリングして結果を待つ (別端末)。`exp` を過ぎたら期限切れ表示にする
-3. `/auth/callback#id_token=…&state=…` (または `#error=access_denied&state=…`) で開かれたら、
-   フラグメントを URL から消し、その内容をそのまま `exchange` の API に送る (同一端末)。
+3. `/auth/callback/<C>#id_token=…` (または `#error=access_denied`) で開かれたら、フラグメントを URL から消し、
+   URL の `<C>` とフラグメントの内容をそのまま `exchange` の API に送る (同一端末)。
    成功すれば**このブラウザ**がログインする。開始したブラウザと同じである必要はない
 
 `sample/src/App.tsx` がそのまま参考になる。
@@ -104,7 +104,7 @@ app.onError((e, c) => (e instanceof AuthError ? c.text(e.message, e.status) : c.
 | `secret` | 必須 | HMAC 鍵。チャレンジの MAC、nonce の導出、メールボックス封筒の署名に使う |
 | `store` | 必須 | `AuthStore` (下記)。メールボックスと応答済みチャレンジの記録に使う |
 | `requestPath` | `/auth/request` | `request_uri = ${origin}${requestPath}/${C}` |
-| `redirectPath` | `/auth/callback` | `redirect_uri = ${origin}${redirectPath}` (§5.3) |
+| `redirectPath` | `/auth/callback` | `redirect_uri = ${origin}${redirectPath}/${C}` (§5.3)。要求ごとに異なり、応答がどの要求のものかはこの URL で決まる |
 | `clientMetadata` | なし | `client_name` / `logo_uri` / `policy_uri` / `tos_uri` (§5.3) |
 | `requestTtl` | 300 | Request Object の有効期間 (秒) |
 | `clockSkew` | 300 | ID Token の `iat` 判定の許容幅 (秒) |
@@ -114,8 +114,9 @@ app.onError((e, c) => (e instanceof AuthError ? c.text(e.message, e.status) : c.
 |---|---|
 | `start()` | §5。`StartedLogin { session, displayCode, exp, challenge, requestUri }`。応答方式に依存せず、何も保存しない |
 | `getRequestObject(challenge)` | §5.3。C から Request Object を再構築。両方式で同じ内容。不正・期限切れは `AuthError('invalid_request', 404)` |
-| `receiveDirectPost(params)` | §8.1。redirect_uri に届いた direct_post を検証し、開始したブラウザのメールボックスに置く。何も返さない (送信者にセッションを発行してはならない) |
-| `exchange(params)` | §8.2。フラグメントの内容を提示してきたブラウザのために検証し `LoginResult` を返す。メールボックスには触らない |
+| `receiveDirectPost(challenge, params)` | §8.1。redirect_uri (末尾が C) に届いた direct_post を検証し、開始したブラウザのメールボックスに置く。何も返さない (送信者にセッションを発行してはならない) |
+| `exchange(challenge, params)` | §8.2。開かれた redirect_uri の C とフラグメントの内容を提示してきたブラウザのために検証し `LoginResult` を返す。メールボックスには触らない |
+| `redirectUriFor(challenge)` | `${origin}${redirectPath}/${C}` |
 | `pollResult(session)` | §8.1。メールボックスから `LoginResult` を 1 回だけ取り出す。無ければ `null` |
 
 `receiveDirectPost` と `exchange` はどちらも成功時にチャレンジを使用済みにする (§9 手順 3)。同じチャレンジへの
@@ -139,10 +140,10 @@ interface AuthStore {
 ### その他
 
 - `authorizationRequestUri(requestUri, mode)` — `https://<host>/<path>` を `concrnt-auth://<mode>/<host>/<path>` にする (§5.2)。ブラウザ側で使う
-- `parseAuthorizationResponse(FormData | URLSearchParams)` — form / フラグメントから `{ state, id_token, error }` を取り出す
+- `parseAuthorizationResponse(FormData | URLSearchParams)` — form / フラグメントから `{ id_token, error }` を取り出す (他は無視)
 - `verifyIdToken(token, { origin, nonce, now?, clockSkew? })` — §9 手順 1〜6 の単体。ConcrntAuth を使わず検証だけしたいとき
 - `emojihash(value)` — `display_code` の絵文字フィンガープリント (`@concrnt/worldlib` と同じ表・同じアルゴリズム)
-- `AuthError { code, status }` — `invalid_option` / `invalid_request` / `request_used` / `missing_state` / `missing_id_token` / `invalid_id_token`
+- `AuthError { code, status }` — `invalid_option` / `invalid_request` / `request_used` / `missing_id_token` / `invalid_id_token`
 
 ## 中で何をしているか
 
@@ -156,8 +157,8 @@ RP が持つ状態は `secret` と `store` の 2 つだけ。
   mac = HMAC-SHA256(secret, 先頭 20 バイト) の先頭 16 バイト (定数時間比較で検証)
   ```
 
-  `request_uri` のパスと Request Object の `state` に載せる。`getRequestObject` は C を検証して Request Object を
-  毎回組み立て直す。`nonce` は保存せず `base64url(HMAC(secret, "nonce:" + C))` で導出し、応答時に同じ計算で照合する。
+  `request_uri` のパス末尾と、Request Object の `redirect_uri` のパス末尾に載せる (`state` は使わない。応答がどの要求のものかは
+  届いた URL で決まる)。`getRequestObject` は C を検証して Request Object を毎回組み立て直す。`nonce` は保存せず `base64url(HMAC(secret, "nonce:" + C))` で導出し、応答時に同じ計算で照合する。
   `sh` はブラウザ秘密 `session` のハッシュで、別端末フローの結果の宛先になる。`session` 自体は QR に載らないので、
   QR を見た第三者は結果を取れない (§8.1)。
 - **応答方式はサーバーに現れない** — Authorization Request URI は `concrnt-auth://<mode>/<host>/<requestPath>/<C>`

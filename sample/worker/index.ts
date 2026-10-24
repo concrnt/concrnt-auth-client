@@ -5,13 +5,15 @@
 //   ---------------------        -----------                              -------------------------
 //   POST /api/login/start -----> auth.start()             チャレンジ C と request_uri を返す。何も保存しない
 //   request_uri を concrnt-auth://<mode>/… にして QR / リンクに
-//                                                         <-QR/link-- GET  /auth/request/:C → auth.getRequestObject(C)
+//                                                         <-QR/link-- GET  /auth/request/:C  → auth.getRequestObject(C)
 //   --- 別端末 (direct_post) ---
-//                                                         <----------- POST /auth/callback  → auth.receiveDirectPost() → mailbox
+//                                                         <----------- POST /auth/callback/:C → auth.receiveDirectPost(C) → mailbox
 //   GET /api/login/status -----> auth.pollResult()        mailbox から結果を回収し、ログイン cookie を発行
 //   --- 同一端末 (fragment) ---
-//   /auth/callback#id_token=… で開かれたブラウザが
-//   POST /api/login/session ---> auth.exchange()          検証して、このブラウザにログイン cookie を発行
+//   /auth/callback/:C#id_token=… で開かれたブラウザが
+//   POST /api/login/session/:C -> auth.exchange(C)        検証して、このブラウザにログイン cookie を発行
+//
+// redirect_uri は要求ごとに異なり (末尾が C)、応答がどの要求のものかは届いた URL で決まる
 //
 //   GET /api/me               -> cookie (ログイントークン L) からログイン中ユーザーを返す
 //
@@ -60,9 +62,10 @@ const route = async (auth: ConcrntAuth, request: Request, url: URL, secret: stri
         return Response.json(auth.getRequestObject(url.pathname.slice(auth.requestPath.length + 1)), { headers: CORS })
     }
 
-    // §8.1: redirect_uri。別端末の Authenticator が direct_post してくる。預かるだけで、送信者には何も発行しない
-    if (request.method === 'POST' && url.pathname === new URL(auth.redirectUri).pathname) {
-        await auth.receiveDirectPost(parseAuthorizationResponse(await request.formData()))
+    // §8.1: redirect_uri (= /auth/callback/<C>)。別端末の Authenticator が direct_post してくる。預かるだけで、送信者には何も発行しない
+    if (request.method === 'POST' && url.pathname.startsWith(auth.redirectPath + '/')) {
+        const challenge = url.pathname.slice(auth.redirectPath.length + 1)
+        await auth.receiveDirectPost(challenge, parseAuthorizationResponse(await request.formData()))
         return new Response(null, { status: 204, headers: CORS })
     }
 
@@ -74,9 +77,11 @@ const route = async (auth: ConcrntAuth, request: Request, url: URL, secret: stri
         return result ? deliver(result, secret) : Response.json({ status: 'pending' })
     }
 
-    // §8.2: redirect_uri#id_token=… で開かれたブラウザが、フラグメントの内容をそのまま送ってくる。送ってきたブラウザにログイン cookie を発行する
-    if (request.method === 'POST' && url.pathname === '/api/login/session') {
-        return deliver(await auth.exchange(parseAuthorizationResponse(await request.formData())), secret)
+    // §8.2: redirect_uri#id_token=… で開かれたブラウザが、開かれた URL の C とフラグメントの内容をそのまま送ってくる。
+    // 送ってきたブラウザにログイン cookie を発行する
+    if (request.method === 'POST' && url.pathname.startsWith('/api/login/session/')) {
+        const challenge = url.pathname.slice('/api/login/session/'.length)
+        return deliver(await auth.exchange(challenge, parseAuthorizationResponse(await request.formData())), secret)
     }
 
     if (request.method === 'GET' && url.pathname === '/api/me') return me(request, secret)

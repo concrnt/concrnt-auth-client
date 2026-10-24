@@ -1,7 +1,7 @@
 // CIP-17 RP のブラウザ側。ログインボタンは 1 つで、押すと両方の経路を同時に始める:
 //   同一端末 (§8.2): concrnt-auth://fragment/… に遷移して同じ端末のアプリを開く。
-//                    アプリが開く /auth/callback#id_token=… をこのブラウザで受け取り、
-//                    フラグメントの内容をそのまま /api/login/session に送って、このブラウザがログインする
+//                    アプリが開く /auth/callback/<C>#id_token=… をこのブラウザで受け取り、
+//                    フラグメントの内容をそのまま /api/login/session/<C> に送って、このブラウザがログインする
 //   別端末   (§8.1): アプリが開かなかった場合に備えて concrnt-auth://direct_post/… の QR も表示し、
 //                    応答を Worker 経由でポーリングで待つ
 // どちらの URI も同じ requestUri から作る。応答方式を選ぶのはここ (ブラウザ) で、サーバーは知らない
@@ -41,12 +41,14 @@ export default function App() {
         if (booted.current) return
         booted.current = true
 
-        // §8.2: アプリがブラウザで開いた /auth/callback#id_token=…&state=… (拒否時は #error=access_denied&state=…)
-        if (location.pathname === '/auth/callback') {
+        // §8.2: アプリがブラウザで開いた /auth/callback/<C>#id_token=… (拒否時は #error=access_denied)。
+        // どの要求への応答かは URL (C) で決まる
+        const callback = /^\/auth\/callback\/([^/]+)$/.exec(location.pathname)
+        if (callback) {
             const params = new URLSearchParams(location.hash.slice(1))
             history.replaceState(null, '', '/') // ID Token を URL に残さない
             // フラグメントの内容をそのまま送る。検証が通れば、このブラウザにログイン cookie が発行される
-            fetch('/api/login/session', { method: 'POST', body: params }).then(async (res) => {
+            fetch(`/api/login/session/${callback[1]}`, { method: 'POST', body: params }).then(async (res) => {
                 if (!res.ok) setPhase({ kind: 'failed', reason: await res.text() })
                 else {
                     const result = await res.json()

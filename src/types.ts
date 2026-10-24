@@ -21,11 +21,11 @@ export interface ClientMetadata {
 
 /** §5.3 Request Object。request_uri への GET が返す JSON。応答方式に関係なく同じ内容 */
 export interface RequestObject {
+    /** 要求ごとに異なる (末尾がチャレンジ C)。応答はここに届くので、RP はこの URL で応答を要求に対応付ける */
     redirect_uri: string
     response_type: 'id_token'
     scope: string
     nonce: string
-    state: string
     exp: number
     /** 常に含める。Authenticator は direct_post のときだけ同意画面に表示する (§6) */
     display_code: string
@@ -69,9 +69,11 @@ export interface StartedLogin {
     requestUri: string
 }
 
-/** §8.1 / §8.2 / §8.3: Authenticator からの応答パラメータ。form (direct_post) でもフラグメント (fragment) でも同じ形 */
+/**
+ * §8.1 / §8.2 / §8.3: Authenticator からの応答パラメータ。form (direct_post) でもフラグメント (fragment) でも同じ形。
+ * どの要求への応答かは、応答が届いた redirect_uri (のチャレンジ C) で決まるので、パラメータには含まれない
+ */
 export interface AuthorizationResponseParams {
-    state?: string | null
     id_token?: string | null
     error?: string | null
 }

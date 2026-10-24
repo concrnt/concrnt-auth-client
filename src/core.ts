@@ -7,15 +7,16 @@
 //   requestUri を concrnt-auth://<mode>/… にして QR / リンクに
 //                                                          <-QR/link-- GET  request_uri      → getRequestObject(C)
 //   --- 別端末 (direct_post) ---
-//                                                          <----------- POST redirect_uri    → receiveDirectPost(params)  → mailbox
+//                                                          <----------- POST redirect_uri    → receiveDirectPost(C, params) → mailbox
 //   ポーリング ----------------> pollResult(session)       mailbox から結果を回収する
 //   --- 同一端末 (fragment) ---
 //   redirect_uri#id_token=… で開かれたブラウザが
-//   フラグメントを送る --------> exchange(params)          検証して claims を返す。この呼び出し元にセッションを発行する
+//   フラグメントを送る --------> exchange(C, params)       検証して claims を返す。この呼び出し元にセッションを発行する
 //
 // 応答方式 (§8) を選ぶのはブラウザで、サーバーは関知しない。受け口の役割が固定されているので判定も要らない:
 //   redirect_uri への POST は「開始した人のために預かる」(叩いた側には何も発行しない)
 //   exchange は「提示した人をログインさせる」(mailbox には触らない)
+// redirect_uri は要求ごとに異なり (末尾が C)、応答がどの要求のものかは届いた URL で決まる。応答パラメータに state は無い
 //
 // できるだけ状態を持たない作り: 要求は HMAC 付きチャレンジ C として Authenticator を経由して戻ってくるので保存しない。
 // 残る状態は secret (HMAC 鍵) と AuthStore だけ。AuthStore には別端末フローのメールボックスと、
@@ -59,7 +60,7 @@ export interface ConcrntAuthOptions {
     store: AuthStore
     /** request_uri のパス。`${origin}${requestPath}/${C}` が request_uri になる。既定 `/auth/request` */
     requestPath?: string
-    /** 応答の送り先 (§5.3 redirect_uri) のパス。`${origin}${redirectPath}`。既定 `/auth/callback` */
+    /** 応答の送り先 (§5.3 redirect_uri) のパス。`${origin}${redirectPath}/${C}` が redirect_uri になる。既定 `/auth/callback` */
     redirectPath?: string
     /** §5.3 client_metadata。同意画面に表示される */
     clientMetadata?: ClientMetadata
@@ -86,7 +87,7 @@ export class ConcrntAuth {
     readonly origin: string
     readonly host: string
     readonly requestPath: string
-    readonly redirectUri: string
+    readonly redirectPath: string
     readonly requestTtl: number
 
     private readonly secret: string
@@ -102,7 +103,7 @@ export class ConcrntAuth {
         this.secret = options.secret
         this.store = options.store
         this.requestPath = normalizePath(options.requestPath ?? '/auth/request', 'requestPath')
-        this.redirectUri = `${this.origin}${normalizePath(options.redirectPath ?? '/auth/callback', 'redirectPath')}`
+        this.redirectPath = normalizePath(options.redirectPath ?? '/auth/callback', 'redirectPath')
         this.clientMetadata = options.clientMetadata
         this.requestTtl = options.requestTtl ?? 300
         this.clockSkew = options.clockSkew ?? 300
@@ -132,11 +133,11 @@ export class ConcrntAuth {
     getRequestObject(challenge: string): RequestObject {
         const req = this.readChallenge(challenge, 404)
         return {
-            redirect_uri: this.redirectUri,
+            // 要求ごとの URL。応答はここに届くので、これだけで要求を復元できる (state は使わない)
+            redirect_uri: this.redirectUriFor(challenge),
             response_type: 'id_token',
             scope: 'openid profile',
             nonce: this.nonceFor(challenge), // 保存せず C から導出する。応答時に同じ計算で照合する
-            state: challenge, // 応答にそのまま返ってくる。これだけで要求を復元できる
             exp: req.exp,
             // §5.3 display_code: 常に付ける。Authenticator は direct_post のときだけ同意画面に出す (§6)
             display_code: displayCodeFor(req.sh),
@@ -144,14 +145,19 @@ export class ConcrntAuth {
         }
     }
 
+    /** §5.3 redirect_uri: `${origin}${redirectPath}/${C}` */
+    redirectUriFor(challenge: string): string {
+        return `${this.origin}${this.redirectPath}/${challenge}`
+    }
+
     /**
-     * §8.1: redirect_uri に届いた応答 (別端末の Authenticator からの direct_post)。
+     * §8.1: redirect_uri に届いた応答 (別端末の Authenticator からの direct_post)。challenge は届いた URL の末尾。
      * 検証して、要求を開始したブラウザが pollResult で回収できるメールボックスに置く。
      * 叩いてきた相手にセッションを発行してはならないので、結果は返さない。
-     * 失敗は AuthError (invalid_request / request_used / missing_* / invalid_id_token)
+     * 失敗は AuthError (invalid_request / request_used / missing_id_token / invalid_id_token)
      */
-    async receiveDirectPost(params: AuthorizationResponseParams): Promise<void> {
-        const { payload, result } = await this.accept(params)
+    async receiveDirectPost(challenge: string, params: AuthorizationResponseParams): Promise<void> {
+        const { payload, result } = await this.accept(challenge, params)
         const sh = base64urlEncode(payload.sh)
         const envelope: MailboxEnvelope = { sh, exp: payload.exp, result }
         await this.store.set(MAILBOX_PREFIX + sh, signJwt(MAILBOX_TYP, envelope, this.secret), this.ttlUntil(payload.exp))
@@ -159,12 +165,13 @@ export class ConcrntAuth {
 
     /**
      * §8.2: redirect_uri#id_token=… で開かれたブラウザが、フラグメントの内容をそのまま提示してきたもの。
-     * 検証して結果を返す。呼び出し元 (提示したブラウザ) にセッションを発行するのは利用側の仕事。
+     * challenge は開かれた URL (redirect_uri) の末尾。検証して結果を返す。
+     * 呼び出し元 (提示したブラウザ) にセッションを発行するのは利用側の仕事。
      * 要求を開始したセッションには結び付けない (メールボックスには触らない)。
-     * 失敗は AuthError (invalid_request / request_used / missing_* / invalid_id_token)
+     * 失敗は AuthError (invalid_request / request_used / missing_id_token / invalid_id_token)
      */
-    async exchange(params: AuthorizationResponseParams): Promise<LoginResult> {
-        return (await this.accept(params)).result
+    async exchange(challenge: string, params: AuthorizationResponseParams): Promise<LoginResult> {
+        return (await this.accept(challenge, params)).result
     }
 
     /**
@@ -187,12 +194,10 @@ export class ConcrntAuth {
         }
     }
 
-    // §8.1 / §8.2 共通: state (= C) を検証し、未使用であることを確認し、ID Token を検証 (§9) または拒否応答 (§8.3) を読み、
+    // §8.1 / §8.2 共通: 届いた URL の C を検証し、未使用であることを確認し、ID Token を検証 (§9) または拒否応答 (§8.3) を読み、
     // チャレンジを使用済みにする。QR とリンクは同じ C を共有するので、片方で成立すればもう片方も使えなくなる
-    private async accept(params: AuthorizationResponseParams): Promise<{ payload: ChallengePayload; result: LoginResult }> {
-        const challenge = params.state
-        if (typeof challenge !== 'string' || challenge === '') throw new AuthError('missing_state', 'state required', 400)
-        const payload = this.readChallenge(challenge, 400)
+    private async accept(challenge: string, params: AuthorizationResponseParams): Promise<{ payload: ChallengePayload; result: LoginResult }> {
+        const payload = this.readChallenge(challenge, 404)
 
         const usedKey = USED_PREFIX + challenge
         if ((await this.store.get(usedKey)) !== null) throw new AuthError('request_used', 'this request has already been answered', 400)
@@ -255,14 +260,14 @@ export const authorizationRequestUri = (requestUri: string, mode: ResponseMode):
 
 /**
  * §8.1 (form) / §8.2 (フラグメント) の応答パラメータを取り出す。
- * `new URLSearchParams(location.hash.slice(1))` や `await request.formData()` をそのまま渡せる
+ * `new URLSearchParams(location.hash.slice(1))` や `await request.formData()` をそのまま渡せる。未知のパラメータは無視する
  */
 export const parseAuthorizationResponse = (source: FormData | URLSearchParams): AuthorizationResponseParams => {
     const pick = (name: string): string | null => {
         const value = source.get(name)
         return typeof value === 'string' ? value : null
     }
-    return { state: pick('state'), id_token: pick('id_token'), error: pick('error') }
+    return { id_token: pick('id_token'), error: pick('error') }
 }
 
 // display_code は session のハッシュから作る。同じチャレンジなら QR でもリンクでも同じ絵文字
