@@ -1,0 +1,37 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "auth-client-better-auth-sample",
+	"main": "worker/index.ts",
+	"compatibility_date": "2026-10-19",
+	"compatibility_flags": ["nodejs_compat"],
+	"assets": {
+		// 画面は SPA。/api/auth/* 以外のナビゲーションは index.html に落ちる
+		"not_found_handling": "single-page-application"
+	},
+	// 公開 URL。カスタムドメインだけで配信し、*.workers.dev は無効にする (RP のオリジンが 1 つに定まる・CIP-17 §5.1)
+	"routes": [{ "pattern": "better-auth-sample.concrnt.net", "custom_domain": true }],
+	"workers_dev": false,
+	"observability": {
+		"enabled": true
+	},
+	"upload_source_maps": true,
+	// better-auth のテーブル (user / session / account / verification) とプラグインの concrntIdentity。
+	// スキーマは migrations/ (pnpm generate-migration で再生成) を `pnpm migrate:local` / `migrate:remote` で適用する。
+	// 別のアカウントにデプロイするときは `wrangler d1 create auth-client-better-auth-sample` で作り直して database_id を差し替える。
+	// ローカル開発 (pnpm dev) ではエミュレートされるので id はそのままでよい
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "auth-client-better-auth-sample",
+			"database_id": "c2307554-b0d7-468e-b6dc-436e2ed0e7c1",
+			"migrations_dir": "migrations"
+		}
+	],
+	// BETTER_AUTH_SECRET は vars ではなく `wrangler secret put BETTER_AUTH_SECRET` で与える (ローカルは .dev.vars)
+	"vars": {
+		// RP のオリジン (CIP-17 §5.1)。request_uri / redirect_uri / ID Token の aud に使う。Authorization Request URI には
+		// host しか載らず https が暗黙なので http では成立しない。空ならリクエストのオリジンを使う。
+		// ローカル開発でトンネル等を使うときは .dev.vars で上書きする
+		"PUBLIC_ORIGIN": ""
+	}
+}

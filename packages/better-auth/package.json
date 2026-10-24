@@ -1,0 +1,60 @@
+{
+	"name": "@concrnt/better-auth",
+	"version": "0.1.0",
+	"description": "Sign-In with Concrnt (CIP-17) plugin for better-auth",
+	"license": "MIT",
+	"type": "module",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"default": "./dist/index.js"
+		},
+		"./client": {
+			"types": "./dist/client.d.ts",
+			"default": "./dist/client.js"
+		}
+	},
+	"files": [
+		"dist",
+		"README.md"
+	],
+	"sideEffects": false,
+	"scripts": {
+		"build": "tsc -p tsconfig.build.json",
+		"test": "vitest run",
+		"lint": "oxlint",
+		"typecheck": "tsc -p tsconfig.json --noEmit"
+	},
+	"dependencies": {
+		"@concrnt/auth-client": "workspace:^"
+	},
+	"peerDependencies": {
+		"@better-auth/core": "^1.7.0",
+		"better-auth": "^1.7.0",
+		"zod": "^4.0.0"
+	},
+	"devDependencies": {
+		"@better-auth/core": "^1.7.12",
+		"@types/node": "^24.19.2",
+		"better-auth": "^1.7.12",
+		"nanostores": "^1.0.1",
+		"oxlint": "^1.81.0",
+		"typescript": "~6.0.2",
+		"vitest": "^4.1.0",
+		"zod": "^4.5.4"
+	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/concrnt/concrnt-auth-client",
+		"directory": "packages/better-auth"
+	},
+	"keywords": [
+		"concrnt",
+		"cip-17",
+		"better-auth",
+		"better-auth-plugin",
+		"authentication"
+	]
+}
