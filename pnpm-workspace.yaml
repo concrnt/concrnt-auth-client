@@ -1,8 +1,8 @@
 packages:
-  - "."
-  - "sample"
+  - "packages/*"
+  - "samples/*"
 
-# sample (Cloudflare Workers) が入れる workerd / esbuild のビルドスクリプトを事前承認する。
+# samples (Cloudflare Workers) が入れる workerd / esbuild のビルドスクリプトを事前承認する。
 # 無いと pnpm 11+ は ERR_PNPM_IGNORED_BUILDS で止まる。
 allowBuilds:
   esbuild: true

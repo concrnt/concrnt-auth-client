@@ -60,8 +60,14 @@ export interface StartedLogin {
     displayCode: string
     /** 要求の失効時刻 (UNIX 秒)。RP は何も保存しないので、期限切れはブラウザ側がこれで判断する */
     exp: number
-    /** チャレンジ C。request_uri のパス末尾と Request Object の state に載る */
+    /** チャレンジ C。request_uri と redirect_uri のパス末尾に載る */
     challenge: string
+    /**
+     * 要求の識別子 (base64url、22 文字)。C に含まれるので QR を見た人も知る値で、秘密ではない。
+     * 利用側が要求ごとの付帯情報 (開始したユーザーなど) を置くキーに使える。応答側では
+     * ConcrntAuth.requestIdOf(challenge) / requestIdOfSession(session) で同じ値が得られる
+     */
+    requestId: string
     /**
      * https://<host>/<requestPath>/<C>。ブラウザはこれを authorizationRequestUri(requestUri, mode) で
      * concrnt-auth://<mode>/<host>/<requestPath>/<C> にして QR やリンクに使う (§5.2)

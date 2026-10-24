@@ -40,6 +40,10 @@ describe('start / authorizationRequestUri / getRequestObject', () => {
         expect(started.exp).toBe(clock + 300)
         expect(started.displayCode).toMatch(/\p{Extended_Pictographic}/u)
         expect(started.challenge).toHaveLength(48)
+        expect(started.requestId).toHaveLength(22)
+        expect(auth.requestIdOf(started.challenge)).toBe(started.requestId)
+        expect(auth.requestIdOfSession(started.session)).toBe(started.requestId)
+        expect(() => auth.requestIdOf(started.challenge.slice(1))).toThrow(AuthError)
         expect(started.requestUri).toBe(`https://login-sample.test/auth/request/${started.challenge}`)
         expect(authorizationRequestUri(started.requestUri, 'direct_post')).toBe(
             `concrnt-auth://direct_post/login-sample.test/auth/request/${started.challenge}`

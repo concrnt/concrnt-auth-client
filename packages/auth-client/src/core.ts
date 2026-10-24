@@ -125,8 +125,19 @@ export class ConcrntAuth {
             displayCode: displayCodeFor(sh),
             exp,
             challenge,
+            requestId: base64urlEncode(sh),
             requestUri: `${this.origin}${this.requestPath}/${challenge}`
         }
+    }
+
+    /** start() の requestId を、応答が届いた URL の C から取り出す。C が不正・期限切れなら invalid_request (404) */
+    requestIdOf(challenge: string): string {
+        return base64urlEncode(this.readChallenge(challenge, 404).sh)
+    }
+
+    /** start() の requestId を、開始したブラウザの秘密 (session) から求める。何も確認しない (箱の鍵と同じ計算) */
+    requestIdOfSession(session: string): string {
+        return base64urlEncode(sessionHash(session))
     }
 
     /** §5.3: Request Object。保存していないので、チャレンジ C から毎回同じものを組み立て直す。応答方式に依存しない */
@@ -223,9 +234,18 @@ export class ConcrntAuth {
             }
         }
 
-        // §9 手順 3: nonce (= この C) を使用済みにする。C の exp を過ぎれば readChallenge が弾くので、記録もそこまででよい
-        await this.store.set(usedKey, '1', this.ttlUntil(payload.exp))
+        // §9 手順 3: nonce (= この C) を使用済みにする。C の exp を過ぎれば readChallenge が弾くので、記録もそこまででよい。
+        // ストアが setIfAbsent を持つなら、検証を通った同時応答のうち 1 件だけが通る
+        if (!(await this.markUsed(usedKey, this.ttlUntil(payload.exp)))) {
+            throw new AuthError('request_used', 'this request has already been answered', 400)
+        }
         return { payload, result }
+    }
+
+    private async markUsed(usedKey: string, ttl: number): Promise<boolean> {
+        if (this.store.setIfAbsent) return this.store.setIfAbsent(usedKey, '1', ttl)
+        await this.store.set(usedKey, '1', ttl)
+        return true
     }
 
     /** nonce (§5.3) は保存せず、チャレンジから秘密鍵で導出する。QR を見た第三者が知ってよい値 (§8.1) */

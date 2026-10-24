@@ -10,6 +10,13 @@ export interface AuthStore {
     /** ttlSeconds を過ぎた値は返さなくてよい (返しても封筒の exp で捨てられる) */
     set(key: string, value: string, ttlSeconds: number): Promise<void>
     delete(key: string): Promise<void>
+    /**
+     * 省略可能。無ければ get → set で代用する。
+     * key が未使用なら value を置いて true、既に (期限内の) 値があれば何もせず false を返す。
+     * 使用済み記録 (§9 手順 3) に使う: 原子的に実装できるストア (DB の主キー衝突・Redis SET NX など) では
+     * 同じ要求への同時応答が 1 件しか通らなくなる。get → set の代用では両方通りうる
+     */
+    setIfAbsent?(key: string, value: string, ttlSeconds: number): Promise<boolean>
 }
 
 /** 単一プロセス用の参照実装。テストやローカル開発向け */
@@ -37,5 +44,11 @@ export class MemoryStore implements AuthStore {
 
     async delete(key: string): Promise<void> {
         this.entries.delete(key)
+    }
+
+    async setIfAbsent(key: string, value: string, ttlSeconds: number): Promise<boolean> {
+        if ((await this.get(key)) !== null) return false
+        await this.set(key, value, ttlSeconds)
+        return true
     }
 }
