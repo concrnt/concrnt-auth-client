@@ -1,4 +1,4 @@
-# concrnt-login-sample
+# auth-client-sample
 
 [CIP-17: External Service Authentication (Sign-In with Concrnt)](https://github.com/concrnt/CIPs) の
 RP (Relying Party) 側の最小サンプル。プロトコル処理は [`@concrnt/auth-client`](../README.md) に任せ、
@@ -56,14 +56,15 @@ RP が持つ状態は `LOGIN_SECRET` (HMAC 鍵。ライブラリのトークン�
 ```sh
 pnpm install
 pnpm build                                  # ルート: @concrnt/auth-client を dist/ へ
-pnpm --filter concrnt-login-sample dev      # http://localhost:5173
+pnpm --filter auth-client-sample dev      # http://localhost:5173
 ```
 
 ただし Authorization Request URI には host しか載らず `request_uri` は https が暗黙なので (§5.2)、
 `http://localhost` のままでは Authenticator から到達できない。実際に world-app から QR を読んで試すには公開 https URL が必要:
 
 - **デプロイする**: `wrangler kv namespace create LOGIN_KV` で作った id を `wrangler.jsonc` の `kv_namespaces[0].id` に入れ、
-  `wrangler secret put LOGIN_SECRET` で署名鍵 (例: `openssl rand -base64 32`) を登録して `pnpm run deploy`。
+  `routes[0].pattern` を自分のドメインにして、`wrangler secret put LOGIN_SECRET` で署名鍵 (例: `openssl rand -base64 32`) を登録し
+  `pnpm run deploy`。デプロイ済みの例: <https://auth-client-sample.concrnt.net>
 - **ローカルをトンネルで公開する**: `cloudflared tunnel --url http://localhost:5173` 等で得た https URL を
   `.dev.vars` の `PUBLIC_ORIGIN` に書く (`.dev.vars.example` 参照)。`LOGIN_SECRET` は `http://localhost` でだけ
   未設定でも固定の開発用鍵で動く。

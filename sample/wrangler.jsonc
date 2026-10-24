@@ -1,11 +1,14 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "concrnt-login-sample",
+	"name": "auth-client-sample",
 	"main": "worker/index.ts",
 	"compatibility_date": "2026-10-19",
 	"assets": {
 		"not_found_handling": "single-page-application"
 	},
+	// 公開 URL。カスタムドメインだけで配信し、*.workers.dev は無効にする (RP のオリジンが 1 つに定まる)
+	"routes": [{ "pattern": "auth-client-sample.concrnt.net", "custom_domain": true }],
+	"workers_dev": false,
 	"observability": {
 		"enabled": true
 	},

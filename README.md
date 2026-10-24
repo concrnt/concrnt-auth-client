@@ -192,7 +192,7 @@ pnpm lint
 
 ```sh
 pnpm build
-pnpm --filter concrnt-login-sample dev
+pnpm --filter auth-client-sample dev
 ```
 
 ## 今後の候補
