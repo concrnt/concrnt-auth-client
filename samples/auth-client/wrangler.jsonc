@@ -23,7 +23,7 @@
 		{
 			"binding": "DB",
 			"database_name": "auth-client-sample",
-			"database_id": "00000000-0000-0000-0000-000000000000",
+			"database_id": "b7addcd0-ae41-4997-a56a-dfe2a1c52aed",
 			"migrations_dir": "migrations"
 		}
 	],
