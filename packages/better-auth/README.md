@@ -41,8 +41,8 @@ import { concrntClient } from '@concrnt/better-auth/client'
 export const authClient = createAuthClient({ plugins: [concrntClient()] })
 ```
 
-RP の識別子 (CIP-17 §5.1) は送り先 URL `${baseURL}/concrnt/callback` で、ID Token の `aud` はこの文字列に完全一致する。
-Authorization Request URI には host/path しか載らず https が暗黙なので、ローカル開発では https のトンネル等を `baseURL` にする
+送り先 URL (CIP-17 §5.1) は `${baseURL}/concrnt/callback?n=<nonce>` で、ID Token の `aud` はこの文字列 (https 表記) に完全一致する。
+Authorization Request URI にはスキームを外した残り (`<rest>`) しか載らず https が暗黙なので、ローカル開発では https のトンネル等を `baseURL` にする
 (`http://localhost` も受け付けるが、別端末の Authenticator からは到達できない)。
 
 better-auth の `user` には `email` が必須なので、Concrnt だけで作られたユーザーには到達不能なプレースホルダー
@@ -108,8 +108,8 @@ concrnt({
 | Method / Path | 役割 |
 |---|---|
 | `POST /concrnt/start` `{ callbackURL?, newUserCallbackURL? }` | 要求を発行。`{ postUri, fragmentUri, displayCode, exp, pollToken }`。新規ユーザーは `newUserCallbackURL` (あれば) に戻る |
-| `POST /concrnt/callback` | §8.1 post の受け口 (送り先 URL)。`application/x-www-form-urlencoded` の `id_token`、または `error=access_denied&nonce=…`。`id_token` の nonce で要求を引き、検証して結果を預け 204。**送信者にセッションは発行しない** |
-| `GET /concrnt/callback` | §8.2 fragment の着地ページ (HTML)。同じ送り先 URL |
+| `POST /concrnt/callback?n=…` | §8.1 post の受け口 (送り先 URL。クエリ付きで届く。ルーティングはパス一致)。`application/x-www-form-urlencoded` の `id_token`、または `error=access_denied&nonce=…`。`id_token` の nonce で要求を引き、検証して結果を預け 204。**送信者にセッションは発行しない** |
+| `GET /concrnt/callback?n=…` | §8.2 fragment の着地ページ (HTML)。同じ送り先 URL |
 | `POST /concrnt/exchange` `{ id_token?, error?, nonce? }` | §8.2 提示したブラウザをサインインさせてセッションを発行 |
 | `POST /concrnt/status` `{ pollToken }` | §8.1 開始したブラウザが結果を回収。`pending` / `denied` / `ok` / `signup_required` |
 | `GET /concrnt/pending-sign-up` | `signUp: 'confirm'`: このブラウザに保留中の `{ profile }` (無ければ `null`) |

@@ -13,8 +13,8 @@ export const ID_TOKEN_LIFETIME = 300
 
 export interface VerifyIdTokenOptions {
     /**
-     * 期待する aud = 発行した送り先 URL ("https://" + <host>/<path>)。正規化せずバイト単位で一致すること (§7.2)。
-     * ConcrntAuth.audience、または audienceOf(redirectUri)
+     * 期待する aud = 発行した送り先 URL ("https://" + <rest>。n / s / RP のクエリ込み)。正規化せずバイト単位で一致すること (§7.2)。
+     * 要求の行に保存した値、または audienceOf(送り先 URL)
      */
     audience: string
     /** この要求の nonce (= 要求の行のキー) */
@@ -43,7 +43,7 @@ export const verifyIdToken = (token: string, options: VerifyIdTokenOptions): IdT
 
     const claims = JSON.parse(utf8String(decodeUnpadded(payloadB64))) as IdTokenClaims
 
-    // 手順3: aud が送り先 URL と完全一致する。オリジンだけ・末尾スラッシュ・オープンリダイレクタ経由のパスはここで落ちる
+    // 手順3: aud が発行した送り先 URL と完全一致する。オリジンだけ・末尾スラッシュ・オープンリダイレクタ経由のパス・s の差し替えはここで落ちる
     if (claims.aud !== options.audience) throw new Error('aud mismatch')
 
     // 手順2 の続き: nonce が行の nonce と一致する (行を引くために payload を先読みしているので通常は一致する)

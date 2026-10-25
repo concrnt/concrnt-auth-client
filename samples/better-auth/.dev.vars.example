@@ -1,5 +1,5 @@
 # ローカル開発で公開 URL (cloudflared 等) を使うときの上書き。無ければ http://localhost:<port> になるが、
-# Authorization Request URI には host/path しか載らず https が暗黙なので、別端末の Authenticator からは到達できない。
+# Authorization Request URI には スキームを外した残りしか載らず https が暗黙なので、別端末の Authenticator からは到達できない。
 PUBLIC_ORIGIN=https://your-tunnel.example.com
 
 # better-auth の secret (セッション cookie の署名など better-auth 自身が使う。CIP-17 の処理には使わない)。本番は `wrangler secret put BETTER_AUTH_SECRET`。

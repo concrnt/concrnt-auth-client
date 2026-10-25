@@ -20,7 +20,7 @@ Cloudflare Workers (バックエンド・D1) + React (フロント)。
                                                                               --->  3. QR (concrnt-auth://post/<host>/api/auth/concrnt/callback?n=…) を読む
                                                                                     4. RP の host と display_code (= emojihash(n)) を表示して同意を取る
                                                                                     5. master key で ID Token に署名 (aud = 送り先 URL)
-                                         POST /api/auth/concrnt/callback <--------- 6. id_token を送り先 URL に POST
+                                         POST /api/auth/concrnt/callback?n=… <----- 6. id_token を送り先 URL (クエリ込み) に POST
                                          id_token の nonce で要求を引き、検証し、行を消費して結果を預ける → 204 (送信者には何も発行しない)
   7. (クライアントが自動で) POST /api/auth/concrnt/status { pollToken }
                                          結果を取り出し、account (providerId 'concrnt') からユーザーを引いてセッション cookie を発行
@@ -32,7 +32,7 @@ Cloudflare Workers (バックエンド・D1) + React (フロント)。
   --- 同一端末 (§8.2 fragment) — リンク ---
   2'. 遷移 ---------(OS の URL スキーム)----------------------------------------->  3'. URI を読み、同意、署名
                                                                                     4'. 送り先 URL#id_token=… をブラウザで開く
-  5'. GET /api/auth/concrnt/callback  → プラグインの着地ページ (HTML)
+  5'. GET /api/auth/concrnt/callback?n=…  → プラグインの着地ページ (HTML)
       着地ページが POST /api/auth/concrnt/exchange → このブラウザにセッション cookie → callbackURL (/) へ
       (未登録の CCID なら保留の cookie だけ付けて / へ。ページが GET /api/auth/concrnt/pending-sign-up で気付いて確認画面を出す)
   6'. ログイン表示 (作成したときは newUserCallbackURL (/?welcome=1) に戻り、案内を出す)
@@ -71,7 +71,7 @@ openssl rand -base64 32 | wrangler secret put BETTER_AUTH_SECRET   # 初回デ�
 
 デプロイ済みの例: <https://better-auth-sample.concrnt.net>
 
-RP の識別子 (CIP-17 §5.1) は送り先 URL `<オリジン>/api/auth/concrnt/callback` で、オリジンはリクエストのオリジン
+送り先 URL (CIP-17 §5.1・ID Token の aud) は `<オリジン>/api/auth/concrnt/callback?n=…` で、オリジンはリクエストのオリジン
 (`PUBLIC_ORIGIN` が空のとき) なので、公開 URL は 1 つに定めること (`workers_dev: false` にしてある)。
 
 ## メモ

@@ -2,7 +2,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import { betterAuth } from 'better-auth'
 import { concrnt, type ConcrntPluginOptions } from '../src/index.js'
-import { issueIdToken, makeIdentity, parseRequestUri, type IdTokenOverrides, type TestIdentity } from '../../auth-client/test/authenticator.js'
+import { issueIdToken, makeIdentity, parseRequestUri, type IdTokenOverrides, type TestIdentity, type TestRequest } from '../../auth-client/test/authenticator.js'
 
 export { makeIdentity, type TestIdentity }
 
@@ -71,7 +71,7 @@ export interface Started {
     pollToken: string
 }
 
-/** 送り先 URL (= RP の識別子 = ID Token の aud)。要求ごとに変わらない */
+/** 送り先 URL のクエリ無しの形。実際の送り先 (= aud) はこれに `?n=…` が付く (要求ごとに変わる) */
 export const CALLBACK_URL = `${ORIGIN}${BASE_PATH}/concrnt/callback`
 
 /** ブラウザ: 開始 */
@@ -80,15 +80,17 @@ export const start = async (auth: TestAuth, body: Record<string, unknown> = {}, 
     return { res, started: (res.ok ? await res.json() : null) as Started | null }
 }
 
-/** Authenticator: URI の n を読む */
-export const nonceOf = (started: Started): string => parseRequestUri(started.postUri).nonce
+/** Authenticator: URI を解釈する (n と aud = "https://" + <rest>) */
+export const requestOf = (started: Started) => parseRequestUri(started.postUri)
+export const nonceOf = (started: Started): string => requestOf(started).nonce
 
-/** Authenticator: ID Token を作る (aud は送り先 URL) */
-export const idTokenFor = (identity: TestIdentity, nonce: string, overrides: IdTokenOverrides = {}): string =>
-    issueIdToken(identity, { nonce, audience: CALLBACK_URL }, Math.floor(Date.now() / 1000), overrides)
+/** Authenticator: ID Token を作る (aud は送り先 URL = "https://" + <rest>)。nonce 文字列だけ渡したときは aud をクエリ無しの形にする (不正ケース用) */
+export const idTokenFor = (identity: TestIdentity, request: TestRequest | string, overrides: IdTokenOverrides = {}): string =>
+    issueIdToken(identity, typeof request === 'string' ? { nonce: request, audience: `${CALLBACK_URL}?n=${request}` } : request, Math.floor(Date.now() / 1000), overrides)
 
-/** Authenticator: §8.1 post */
-export const post = (auth: TestAuth, form: Record<string, string>): Promise<Response> => call(auth, 'POST', CALLBACK_URL, { form, authenticator: true })
+/** Authenticator: §8.1 post。送り先は <rest> (クエリ込み)。request を省略すると (拒否応答など) クエリ無しの URL に送る */
+export const post = (auth: TestAuth, form: Record<string, string>, request?: { redirectUri: string }): Promise<Response> =>
+    call(auth, 'POST', request ? request.redirectUri : CALLBACK_URL, { form, authenticator: true })
 
 /** ブラウザ: §8.1 ポーリング */
 export const poll = (auth: TestAuth, started: Started, headers?: HeadersInit): Promise<Response> =>
@@ -102,10 +104,10 @@ export const exchange = (auth: TestAuth, body: { id_token?: string | null; error
 export const postFlow = async (auth: TestAuth, identity: TestIdentity, startBody: Record<string, unknown> = {}, headers?: HeadersInit) => {
     const { res: startRes, started } = await start(auth, startBody, headers)
     if (!started) throw new Error(`start failed: ${startRes.status} ${await startRes.text()}`)
-    const nonce = nonceOf(started)
-    const posted = await post(auth, { id_token: idTokenFor(identity, nonce) })
+    const request = requestOf(started)
+    const posted = await post(auth, { id_token: idTokenFor(identity, request) }, request)
     const polled = await poll(auth, started, headers)
-    return { started, nonce, posted, polled }
+    return { started, request, nonce: request.nonce, posted, polled }
 }
 
 let userSeq = 0

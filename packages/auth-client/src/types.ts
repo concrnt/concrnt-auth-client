@@ -17,7 +17,7 @@ export const isResponseMode = (value: unknown): value is ResponseMode =>
 export interface IdTokenClaims {
     iss: string
     sub: string
-    /** 送り先 URL ("https://" + <host>/<path>) そのもの。オリジンではない (§7.2) */
+    /** 送り先 URL ("https://" + <rest>。n / s / RP のクエリ込み) そのもの。オリジンではない (§7.2) */
     aud: string
     nonce: string
     iat: number
@@ -35,9 +35,9 @@ export interface IdTokenClaims {
 
 /** start() の結果。そのままブラウザに返してよい。応答方式には依存しない */
 export interface StartedLogin {
-    /** QR にする Authorization Request URI (concrnt-auth://post/…?n=…)。別端末の Authenticator が読む (§8.1) */
+    /** QR にする Authorization Request URI (concrnt-auth://post/<rest>)。別端末の Authenticator が読む (§8.1) */
     postUri: string
-    /** 同一端末で開くリンク (concrnt-auth://fragment/…?n=…)。同じ端末のアプリが開く (§8.2) */
+    /** 同一端末で開くリンク (concrnt-auth://fragment/<rest>)。同じ端末のアプリが開く (§8.2) */
     fragmentUri: string
     /** display_code = emojihash(n) (付録 A)。同意画面 (post) と見比べる絵文字 */
     displayCode: string

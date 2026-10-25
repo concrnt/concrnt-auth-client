@@ -28,8 +28,8 @@
 		}
 	],
 	"vars": {
-		// RP のオリジン。送り先 URL (= RP の識別子・ID Token の aud、CIP-17 §5.1) は `${origin}/auth/callback`。Authorization Request URI には
-		// host/path しか載らず https が暗黙なので http では成立しない (Authenticator が http で送ってよいのは localhost だけ)。
+		// RP のオリジン。送り先 URL (= RP の識別子・ID Token の aud、CIP-17 §5.1) は `${origin}/auth/callback?n=…`。Authorization Request URI には
+		// スキームを外した残りしか載らず https が暗黙なので http では成立しない (Authenticator が http で送ってよいのは localhost だけ)。
 		// 空ならリクエストのオリジンを使う。ローカル開発でトンネル等を使うときは .dev.vars で上書きする。
 		"PUBLIC_ORIGIN": ""
 	}

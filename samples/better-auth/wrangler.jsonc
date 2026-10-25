@@ -29,8 +29,8 @@
 	],
 	// BETTER_AUTH_SECRET は vars ではなく `wrangler secret put BETTER_AUTH_SECRET` で与える (ローカルは .dev.vars)
 	"vars": {
-		// RP のオリジン。送り先 URL (= RP の識別子・ID Token の aud、CIP-17 §5.1) は `${origin}/api/auth/concrnt/callback`。
-		// Authorization Request URI には host/path しか載らず https が暗黙なので http では成立しない。空ならリクエストのオリジンを使う。
+		// RP のオリジン。送り先 URL (= RP の識別子・ID Token の aud、CIP-17 §5.1) は `${origin}/api/auth/concrnt/callback?n=…`。
+		// Authorization Request URI には スキームを外した残りしか載らず https が暗黙なので http では成立しない。空ならリクエストのオリジンを使う。
 		// ローカル開発でトンネル等を使うときは .dev.vars で上書きする
 		"PUBLIC_ORIGIN": ""
 	}

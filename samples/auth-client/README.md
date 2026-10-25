@@ -26,7 +26,7 @@ Authenticator が Worker に何かを取りに来ることは無い。
                                                                           --->  3. QR (concrnt-auth://post/<host>/auth/callback?n=…) を読む
                                                                                 4. RP の host と display_code (= emojihash(n)) を表示して同意を取る
                                                                                 5. master key で ID Token に署名 (aud = https://<host>/auth/callback)
-                                  POST /auth/callback  <------------------------ 6. id_token を送り先 URL に POST
+                                  POST /auth/callback?n=… <--------------------- 6. id_token を送り先 URL (クエリ込み) に POST
                                   auth.receivePost() → id_token の nonce で要求を引き、検証して消費し、結果を預ける → 204 (送信者には何も発行しない)
   7. POST /api/login/status ---> auth.pollResult(pollToken) → D1 にセッションを作り cookie sid で発行
      { pollToken }               (runLogin が 2 秒ごとに繰り返す)
@@ -34,9 +34,9 @@ Authenticator が Worker に何かを取りに来ることは無い。
 
   --- 同一端末 (§8.2 fragment) — リンク ---
   2'. 遷移 ---------(OS の URL スキーム)---------------------------------------->  3'. URI を読み、同意、署名
-                                                                                4'. https://<host>/auth/callback#id_token=… を
+                                                                                4'. https://<host>/auth/callback?n=…#id_token=… を
                                                                                     ブラウザで開く
-  5'. GET /auth/callback  → ライブラリの着地ページ (landingPage)。フラグメントを読んで
+  5'. GET /auth/callback?n=…  → ライブラリの着地ページ (landingPage)。フラグメントを読んで
       POST /api/login/exchange { id_token } → auth.exchange() → 検証して、このブラウザに cookie を発行
       → / へ遷移
   6'. ログイン表示
@@ -60,7 +60,7 @@ pnpm --filter auth-client-sample migrate:local    # ローカル D1 にスキー
 pnpm --filter auth-client-sample dev              # http://localhost:5173
 ```
 
-ただし Authorization Request URI には host/path しか載らず送り先は https が暗黙なので (§5.2)、
+ただし Authorization Request URI にはスキームを外した残りしか載らず送り先は https が暗黙なので (§5.2)、
 `http://localhost` のままでは別端末の Authenticator から到達できない。実際に world-app から QR を読んで試すには公開 https URL が必要:
 
 - **デプロイする**:
@@ -88,7 +88,8 @@ pnpm --filter auth-client-sample dev              # http://localhost:5173
 - **着地ページは Worker が返す**: `assets.run_worker_first` に `/auth/*` と `/api/*` を入れてある。無いと compatibility_date が
   2025-04-01 以降では navigation GET が Worker を通らず SPA の `index.html` になる。
 - **Authorization Request URI** は `concrnt-auth://post/<host>/auth/callback?n=<nonce>` で 70〜80 バイト (host 次第)。
-  ID Token の `aud` はこの送り先 URL `https://<host>/auth/callback` そのもの (オリジンではない)。
+  ID Token の `aud` は送り先 URL `https://<host>/auth/callback?n=<nonce>` そのもの (オリジンでもパスだけでもない)。
+  RP 自身のクエリを送り先に持たせたければ `auth.start(undefined, { query: { return: '/settings' } })` (名前は 2 文字以上)。
 
 ## 対象外
 

@@ -31,8 +31,8 @@ const LANDING_TEXTS = { title: 'Concrnt でログイン', working: 'ログイン
 export default {
     async fetch(request, env) {
         const url = new URL(request.url)
-        // RP のオリジン。送り先 URL (= RP の識別子 §5.1) は `${origin}/auth/callback`。Authorization Request URI には host/path しか
-        // 載らず https が暗黙なので、ローカル開発 (http://localhost) では PUBLIC_ORIGIN で公開 URL を指定する
+        // RP のオリジン。送り先 URL (= ID Token の aud §5.1) は `${origin}/auth/callback?n=…`。Authorization Request URI にはスキームを
+        // 外した残りしか載らず https が暗黙なので、ローカル開発 (http://localhost) では PUBLIC_ORIGIN で公開 URL を指定する
         const auth = new ConcrntAuth({ origin: env.PUBLIC_ORIGIN || url.origin, store: d1Store(env.DB) })
         try {
             return await route(auth, request, url, env.DB)
@@ -50,6 +50,7 @@ const route = async (auth: ConcrntAuth, request: Request, url: URL, db: D1Databa
     // §5: 要求を発行する。応答方式は選ばない。start() の結果をそのままブラウザに返す
     if (method === 'POST' && pathname === '/api/login/start') return Response.json(await auth.start())
 
+    // 送り先 URL にはクエリ (n, s) が付いて届く。振り分けはパスで行う
     if (pathname === auth.redirectPath) {
         // §8.1: 送り先 URL に別端末の Authenticator が POST してくる。nonce で要求を引いて預かるだけで、送信者には何も発行しない
         if (method === 'POST') {

@@ -15,10 +15,11 @@
 // 応答方式 (§8) を選ぶのはブラウザで、サーバーは関知しない。受け口の役割が固定されているので判定も要らない:
 //   送り先 URL への POST は「開始した人のために預かる」(叩いた側には何も発行しない)
 //   exchange は「提示した人をログインさせる」(預け先には触らない)
-// 送り先 URL (= redirectUri) は RP ごとに 1 本。応答がどの要求のものかは id_token の payload の nonce
+// 送り先 URL は `${origin}${redirectPath}?<RP の任意クエリ>&n=<nonce>[&s=<scope>]` で、これが ID Token の aud に
+// そのまま入る (§7.2。Authenticator は加工しない)。応答がどの要求のものかは id_token の payload の nonce
 // (拒否応答なら nonce パラメータ) で決まる。要求の内容はすべて Authorization Request URI に載る (by-value)
 //
-// 状態は AuthStore の行だけ。要求ごとに 1 行 (`concrnt-auth:request:<nonce>`) を置き、応答を受理するときに原子的に消費する
+// 状態は AuthStore の行だけ。要求ごとに 1 行 (`concrnt-auth:request:<nonce>`、aud の期待値を含む) を置き、応答を受理するときに原子的に消費する
 // (= §9 手順 7 の nonce 一回限り)。別端末フローの結果は `concrnt-auth:result:<H(pollToken)>` に置き、開始したブラウザが
 // pollToken で原子的に取り出す。秘密鍵は要らない
 import { AuthError } from './errors.js'
@@ -38,7 +39,7 @@ export interface ConcrntAuthOptions {
     origin: string
     /** 要求の行と別端末フローの結果を置く */
     store: AuthStore
-    /** 応答の送り先 URL のパス。`${origin}${redirectPath}` が送り先 URL (= RP の識別子) になる。既定 `/auth/callback` */
+    /** 応答の送り先 URL のパス。`${origin}${redirectPath}?…&n=<nonce>` が送り先 URL になる。クエリは持てない (start の query で渡す)。既定 `/auth/callback` */
     redirectPath?: string
     /**
      * §5.2 s: 要求する追加情報 (スペース区切り)。省略すると URI に s を付けず、"profile" を指定したものとみなされる。
@@ -63,16 +64,24 @@ interface PendingRequest<T> {
     exp: number
     /** 開始したブラウザの秘密 pollToken の SHA-256。別端末フローの結果の宛先 */
     pollHash: string
+    /** ID Token の aud の期待値 = 発行した送り先 URL ("https://" + <rest>。クエリ込み)。§9 手順 3 でバイト一致を見る */
+    audience: string
     context: T
+}
+
+export interface StartOptions {
+    /**
+     * 送り先 URL に付ける RP 自身のクエリ (§5.2)。n / s と同じクエリ文字列に混ざり、そのまま aud と応答の届く URL に入る。
+     * 1 文字の名前は本仕様の予約なので使えない (invalid_option)
+     */
+    query?: Record<string, string>
 }
 
 export class ConcrntAuth<T = undefined> {
     readonly origin: string
     readonly redirectPath: string
-    /** 応答の送り先 URL (RP が実際に配信する URL)。`${origin}${redirectPath}` */
+    /** 応答の送り先 URL のクエリ無しの形 (RP が配信するエンドポイント)。実際の送り先はこれに `?…&n=` が付く */
     readonly redirectUri: string
-    /** RP の識別子 = ID Token の aud の期待値。"https://" + <host>/<path>。origin が http://localhost でも https 表記 */
-    readonly audience: string
     readonly requestTtl: number
 
     private readonly store: AuthStore
@@ -85,7 +94,6 @@ export class ConcrntAuth<T = undefined> {
         this.store = options.store
         this.redirectPath = normalizePath(options.redirectPath ?? '/auth/callback', 'redirectPath')
         this.redirectUri = this.origin + this.redirectPath
-        this.audience = audienceOf(this.redirectUri)
         this.scope = options.scope
         this.requestTtl = options.requestTtl ?? 300
         this.clockSkew = options.clockSkew ?? 300
@@ -94,20 +102,23 @@ export class ConcrntAuth<T = undefined> {
 
     /**
      * §5: Authorization Request を発行する。要求の行を 1 つ置き、両方の応答方式の URI を返す。
-     * context は要求ごとの付帯情報 (開始したユーザー、戻り先 URL など) で、結果と一緒にそのまま戻る
+     * context は要求ごとの付帯情報 (開始したユーザー、戻り先 URL など) で、結果と一緒にそのまま戻る。
+     * options.query は送り先 URL に付ける RP 自身のクエリ (応答の届く URL と aud にそのまま入る)
      */
-    async start(context: T): Promise<StartedLogin>
-    async start(this: ConcrntAuth<undefined>): Promise<StartedLogin>
-    async start(context?: T): Promise<StartedLogin> {
+    async start(context: T, options?: StartOptions): Promise<StartedLogin>
+    async start(this: ConcrntAuth<undefined>, context?: undefined, options?: StartOptions): Promise<StartedLogin>
+    async start(context?: T, options?: StartOptions): Promise<StartedLogin> {
         const nonce = randomToken(16) // §5.2 n: 16 バイトの乱数 (22 文字)。行のキーであり display_code の素
         const pollToken = randomToken(32) // ブラウザだけが知る秘密 (§8.1)。QR には含めない
         const exp = this.now() + this.requestTtl
-        const request: PendingRequest<T> = { exp, pollHash: await sha256Base64url(pollToken), context: context as T }
+        // 送り先 URL = redirectUri + RP のクエリ + n [+ s]。この文字列が (https にして) aud になる。Authenticator は加工しない
+        const target = deliveryUrl(this.redirectUri, nonce, this.scope, options?.query)
+        const request: PendingRequest<T> = { exp, pollHash: await sha256Base64url(pollToken), audience: audienceOf(target), context: context as T }
         await this.store.put(REQUEST_PREFIX + nonce, JSON.stringify(request), exp)
         return {
-            // 応答方式を選ぶのはブラウザ (§8)。QR には post、同一端末で開くリンクには fragment
-            postUri: authorizationRequestUri(this.redirectUri, 'post', nonce, this.scope),
-            fragmentUri: authorizationRequestUri(this.redirectUri, 'fragment', nonce, this.scope),
+            // 応答方式を選ぶのはブラウザ (§8)。QR には post、同一端末で開くリンクには fragment。<rest> は同じ
+            postUri: authorizationRequestUri(target, 'post'),
+            fragmentUri: authorizationRequestUri(target, 'fragment'),
             displayCode: emojihash(nonce),
             exp,
             pollToken
@@ -179,7 +190,8 @@ export class ConcrntAuth<T = undefined> {
             nonce = peeked
             request = await this.findRequest(nonce)
             try {
-                const claims = verifyIdToken(idToken, { audience: this.audience, nonce, now: this.now(), clockSkew: this.clockSkew })
+                // 手順 3: aud は発行時に保存した送り先 URL とバイト一致
+                const claims = verifyIdToken(idToken, { audience: request.audience, nonce, now: this.now(), clockSkew: this.clockSkew })
                 result = { status: 'ok', claims, idToken, context: request.context }
             } catch (e) {
                 throw new AuthError('invalid_id_token', `invalid id_token: ${(e as Error).message}`, 400)
@@ -194,19 +206,35 @@ export class ConcrntAuth<T = undefined> {
 }
 
 /**
- * §5.2: 送り先 URL (https://<host>/<path>) から Authorization Request URI
- * `concrnt-auth://<mode>/<host>/<path>?n=<nonce>[&s=<scope>]` を作る。start() が両方式の URI を返すので通常は呼ばなくてよい。
- * scope を省略すると s は付かない (= "profile")。'' を渡すと `s=` (CCID のみ)
+ * §5.2: 送り先 URL (クエリ無し) に RP のクエリと n [+ s] を付けて、完全な送り先 URL を作る。
+ * 1 文字のパラメータ名は本仕様の予約 (RP は 2 文字以上を使う MUST)。scope を省略すると s は付かない (= "profile")。'' を渡すと `s=` (CCID のみ)
  */
-export const authorizationRequestUri = (redirectUri: string, mode: ResponseMode, nonce: string, scope?: string): string => {
-    if (!RESPONSE_MODES.includes(mode)) throw new AuthError('invalid_option', `unknown response type: ${mode}`, 500)
+export const deliveryUrl = (redirectUri: string, nonce: string, scope?: string, query?: Record<string, string>): string => {
     if (!/^[A-Za-z0-9_-]{22,}$/.test(nonce)) throw new AuthError('invalid_option', 'nonce must be base64url of at least 16 bytes', 500)
-    const query = `n=${nonce}` + (scope === undefined ? '' : `&s=${encodeURIComponent(scope)}`)
-    return `concrnt-auth://${mode}/${requestTarget(redirectUri)}?${query}`
+    if (redirectUri.includes('?') || redirectUri.includes('#')) {
+        throw new AuthError('invalid_option', `redirect URI must not contain a query or fragment (pass RP parameters as query): ${redirectUri}`, 500)
+    }
+    const params = new URLSearchParams()
+    for (const [key, value] of Object.entries(query ?? {})) {
+        if (key.length < 2) throw new AuthError('invalid_option', `single-character query parameter names are reserved: ${key}`, 500)
+        params.set(key, value)
+    }
+    params.set('n', nonce)
+    if (scope !== undefined) params.set('s', scope)
+    return `${redirectUri}?${params.toString()}`
 }
 
-/** §5.1: ID Token の aud の期待値 = "https://" + <host>/<path>。送り先 URL が http://localhost でも https 表記 */
-export const audienceOf = (redirectUri: string): string => `https://${requestTarget(redirectUri)}`
+/**
+ * §5.2: 完全な送り先 URL (https://<rest>) から Authorization Request URI `concrnt-auth://<mode>/<rest>` を作る。
+ * "https://" を外すだけで <rest> は加工しない。start() が両方式の URI を返すので通常は呼ばなくてよい
+ */
+export const authorizationRequestUri = (url: string, mode: ResponseMode): string => {
+    if (!RESPONSE_MODES.includes(mode)) throw new AuthError('invalid_option', `unknown response type: ${mode}`, 500)
+    return `concrnt-auth://${mode}/${requestTarget(url)}`
+}
+
+/** §7.2: ID Token の aud の期待値 = "https://" + <rest>。送り先 URL が http://localhost でも https 表記 */
+export const audienceOf = (url: string): string => `https://${requestTarget(url)}`
 
 /**
  * §8.1 (form) / §8.2 (フラグメント) の応答パラメータを取り出す。
@@ -222,26 +250,24 @@ export const parseAuthorizationResponse = (source: FormData | URLSearchParams | 
 }
 
 /**
- * 送り先 URL から URI に載せる <host>/<path> を取る。https か、ローカル開発用の http://localhost / 127.0.0.1 のみ。
- * userinfo・クエリ (本仕様のパラメータが入るので持てない)・フラグメント・空パスは拒否。正規化はしない (aud はこの文字列にバイト一致)
+ * 送り先 URL から URI に載せる <rest> (= スキームを外した残り。クエリ込み) を取る。https か、ローカル開発用の http://localhost / 127.0.0.1 のみ。
+ * userinfo・フラグメント・空パスは拒否。正規化はしない (aud はこの文字列にバイト一致)
  */
-const requestTarget = (redirectUri: string): string => {
+const requestTarget = (target: string): string => {
     let url: URL
     try {
-        url = new URL(redirectUri)
+        url = new URL(target)
     } catch {
-        throw new AuthError('invalid_option', `redirect URI is not a URL: ${redirectUri}`, 500)
+        throw new AuthError('invalid_option', `redirect URI is not a URL: ${target}`, 500)
     }
     const isLocalhost = url.hostname === 'localhost' || url.hostname === '127.0.0.1'
     if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLocalhost)) {
-        throw new AuthError('invalid_option', `redirect URI must be https (http only for localhost): ${redirectUri}`, 500)
+        throw new AuthError('invalid_option', `redirect URI must be https (http only for localhost): ${target}`, 500)
     }
-    if (url.username || url.password) throw new AuthError('invalid_option', `redirect URI must not contain userinfo: ${redirectUri}`, 500)
-    if (redirectUri.includes('?') || redirectUri.includes('#')) {
-        throw new AuthError('invalid_option', `redirect URI must not contain a query or fragment: ${redirectUri}`, 500)
-    }
-    if (url.pathname === '/') throw new AuthError('invalid_option', `redirect URI path must not be empty: ${redirectUri}`, 500)
-    return redirectUri.slice(redirectUri.indexOf('://') + 3)
+    if (url.username || url.password) throw new AuthError('invalid_option', `redirect URI must not contain userinfo: ${target}`, 500)
+    if (target.includes('#')) throw new AuthError('invalid_option', `redirect URI must not contain a fragment: ${target}`, 500)
+    if (url.pathname === '/') throw new AuthError('invalid_option', `redirect URI path must not be empty: ${target}`, 500)
+    return target.slice(target.indexOf('://') + 3)
 }
 
 const normalizeOrigin = (origin: string): string => {

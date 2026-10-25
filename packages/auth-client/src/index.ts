@@ -1,4 +1,4 @@
-export { ConcrntAuth, authorizationRequestUri, audienceOf, parseAuthorizationResponse, type ConcrntAuthOptions } from './core.js'
+export { ConcrntAuth, authorizationRequestUri, audienceOf, deliveryUrl, parseAuthorizationResponse, type ConcrntAuthOptions, type StartOptions } from './core.js'
 export { AuthError, type AuthErrorCode } from './errors.js'
 export { MemoryStore, type AuthStore } from './store.js'
 export { verifyIdToken, peekIdTokenNonce, ccidFromPublicKey, ID_TOKEN_LIFETIME, type VerifyIdTokenOptions } from './verify.js'

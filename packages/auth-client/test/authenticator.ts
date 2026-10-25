@@ -42,14 +42,16 @@ export interface TestRequest {
     audience: string
 }
 
-/** URI (concrnt-auth://<type>/<host>/<path>?n=…) を Authenticator と同じように解釈する */
-export const parseRequestUri = (uri: string): TestRequest & { mode: string; scope: string | null; redirectUri: string } => {
-    const m = /^concrnt-auth:\/\/([^/]+)\/([^?#]+)\?(.*)$/.exec(uri)
-    if (!m) throw new Error(`not an Authorization Request URI: ${uri}`)
-    const query = new URLSearchParams(m[3]!)
+/** URI (concrnt-auth://<type>/<rest>) を Authenticator と同じように解釈する。<rest> は加工せず "https://" を付けるだけ */
+export const parseRequestUri = (uri: string): TestRequest & { mode: string; scope: string | null; rest: string; redirectUri: string; query: URLSearchParams } => {
+    const m = /^concrnt-auth:\/\/([^/]+)\/(.+)$/.exec(uri)
+    if (!m || m[2]!.includes('#')) throw new Error(`not an Authorization Request URI: ${uri}`)
+    const rest = m[2]!
+    const q = rest.indexOf('?')
+    const query = new URLSearchParams(q < 0 ? '' : rest.slice(q + 1))
     const nonce = query.get('n')
     if (!nonce) throw new Error('n is required')
-    return { mode: m[1]!, nonce, scope: query.get('s'), audience: `https://${m[2]!}`, redirectUri: `https://${m[2]!}` }
+    return { mode: m[1]!, nonce, scope: query.get('s'), rest, query, audience: `https://${rest}`, redirectUri: `https://${rest}` }
 }
 
 export const issueIdToken = (identity: TestIdentity, request: TestRequest, now: number, overrides: IdTokenOverrides = {}): string => {

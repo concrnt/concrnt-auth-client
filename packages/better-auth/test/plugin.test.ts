@@ -13,6 +13,7 @@ import {
     listAccounts,
     makeIdentity,
     nonceOf,
+    requestOf,
     ORIGIN,
     poll,
     post,
@@ -38,6 +39,8 @@ describe('start', () => {
         expect(started!).not.toHaveProperty('requestUri')
         expect(started!).not.toHaveProperty('challenge')
         expect(started!).not.toHaveProperty('directPostUri')
+        // 送り先 URL (= aud) はクエリ (n) 込み
+        expect(requestOf(started!).audience).toBe(`${CALLBACK_URL}?n=${nonce}`)
         // Request Object のエンドポイントは無い
         expect((await call(auth, 'GET', `/concrnt/request/${nonce}`)).ok).toBe(false)
     })
@@ -172,16 +175,18 @@ describe('sign-in (post)', () => {
     it('also accepts JSON bodies on the post endpoint and rejects unknown media types', async () => {
         const auth = await createTestAuth()
         const { started } = await start(auth)
-        const asText = await call(auth, 'POST', CALLBACK_URL, { headers: { 'content-type': 'text/plain' }, authenticator: true })
+        const request = requestOf(started!)
+        const asText = await call(auth, 'POST', request.redirectUri, { headers: { 'content-type': 'text/plain' }, authenticator: true })
         expect(asText.ok).toBe(false)
-        expect((await call(auth, 'POST', CALLBACK_URL, { json: { id_token: idTokenFor(alice, nonceOf(started!)) }, authenticator: true })).status).toBe(204)
+        expect((await call(auth, 'POST', request.redirectUri, { json: { id_token: idTokenFor(alice, request) }, authenticator: true })).status).toBe(204)
     })
 })
 
 describe('sign-in (fragment)', () => {
-    it('serves the landing page at the callback URL with a CSP that allows only its own script', async () => {
+    it('serves the landing page at the callback URL (with the request query) with a CSP that allows only its own script', async () => {
         const auth = await createTestAuth()
-        const res = await call(auth, 'GET', CALLBACK_URL)
+        const { started } = await start(auth)
+        const res = await call(auth, 'GET', requestOf(started!).redirectUri)
         expect(res.status).toBe(200)
         expect(res.headers.get('content-type')).toContain('text/html')
         expect(res.headers.get('cache-control')).toBe('no-store')

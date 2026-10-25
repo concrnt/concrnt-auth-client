@@ -38,17 +38,18 @@ const store: AuthStore = {
 const auth = new ConcrntAuth({
     origin: 'https://rp.example', // RP のオリジン。https 必須 (http://localhost だけ例外)
     store
-    // redirectPath: '/auth/callback' (既定)。送り先 URL `${origin}${redirectPath}` が RP の識別子 (§5.1) で、ID Token の aud になる
+    // redirectPath: '/auth/callback' (既定)。送り先 URL は `${origin}${redirectPath}?…&n=<nonce>` で、その文字列がそのまま ID Token の aud になる
     // scope: 'profile' (省略 = profile。'' で CCID のみ)、requestTtl: 300 (既定)
 })
 
-// 2. ログイン開始。結果をそのままブラウザに返す。応答方式はここでは決まらない
+// 2. ログイン開始。結果をそのままブラウザに返す。応答方式はここでは決まらない。
+//    送り先 URL に RP 自身のクエリを付けたければ start(context, { query }) (名前は 2 文字以上。1 文字は仕様の予約)
 app.post('/api/login/start', async (c) => c.json(await auth.start()))
 //   postUri     — QR にする URI (別端末)         fragmentUri — 同一端末のアプリを開くリンク
 //   displayCode — 同意画面と見比べる絵文字       exp — 要求の失効時刻 (期限切れはブラウザが判断する)
 //   pollToken   — ブラウザだけが知る秘密。別端末フローの結果を回収するのに使う。QR には載らない
 
-// 3. 送り先 URL (POST /auth/callback): 別端末の Authenticator が form で id_token を POST してくる。
+// 3. 送り先 URL (POST /auth/callback?…&n=…): 別端末の Authenticator が form で id_token を POST してくる (URL にはクエリが付く。パスで振り分ける)。
 //    id_token の nonce で要求を引き、検証して「開始した人のため」に預かるだけ。送信者には何も発行しない
 app.post('/auth/callback', async (c) => {
     await auth.receivePost(parseAuthorizationResponse(await c.req.formData()))
@@ -119,7 +120,7 @@ const result = await runLogin({
 |---|---|---|
 | `origin` | 必須 | RP のオリジン `scheme://host[:port]`。末尾スラッシュ・パス不可。https 以外は `http://localhost` / `127.0.0.1` だけ許す (ローカル開発用。その場合も識別子は https 表記) |
 | `store` | 必須 | `AuthStore` (下記) |
-| `redirectPath` | `/auth/callback` | 送り先 URL `${origin}${redirectPath}` のパス。この URL が RP の識別子 (§5.1) で、ID Token の `aud` と完全一致する。RP ごとに 1 本で要求ごとには変わらない |
+| `redirectPath` | `/auth/callback` | 送り先 URL のパス (クエリ不可)。実際の送り先は `${origin}${redirectPath}?<RP のクエリ>&n=<nonce>[&s=…]` で、その文字列 (https 表記) が ID Token の `aud` と完全一致する (§7.2)。エンドポイントは 1 本で、ルーティングはパスで行う |
 | `scope` | なし (= `profile`) | URI の `s` (§5.2)。省略すると `s` を付けず `profile` 扱い。`''` で `s=` (CCID のみ) |
 | `requestTtl` | 300 | 要求の行の有効期間 (秒)。この間に応答が届かなければ失効する。URI には載らない |
 | `clockSkew` | 300 | ID Token の `exp` / `iat` 判定の時計ずれ許容幅 (秒) |
@@ -127,12 +128,11 @@ const result = await runLogin({
 
 | メソッド / フィールド | 役割 |
 |---|---|
-| `start(context?)` | §5。要求の行を 1 つ置き `StartedLogin { postUri, fragmentUri, displayCode, exp, pollToken }` を返す |
+| `start(context?, { query? })` | §5。要求の行を 1 つ置き `StartedLogin { postUri, fragmentUri, displayCode, exp, pollToken }` を返す。`query` は送り先 URL に付ける RP 自身のパラメータ (`Record<string,string>`。1 文字の名前は予約で不可)。そのまま応答の届く URL と `aud` に入る |
 | `receivePost(params)` | §8.1。送り先 URL に届いた POST。`id_token` の nonce で要求を引き、検証・消費して結果を預ける。何も返さない (送信者にセッションを発行してはならない) |
 | `exchange(params)` | §8.2。着地ページが送ってきたフラグメントの内容を検証・消費して `LoginResult` を返す。開始したブラウザには何も届かない |
 | `pollResult(pollToken)` | §8.1。預けられた `LoginResult` を 1 回だけ取り出す。無ければ `null` |
-| `redirectUri` | 送り先 URL `${origin}${redirectPath}` (RP が配信する URL) |
-| `audience` | ID Token の `aud` の期待値 `https://<host>/<path>` (origin が `http://localhost` でも https 表記) |
+| `redirectUri` | 送り先 URL のクエリ無しの形 `${origin}${redirectPath}` (RP が配信するエンドポイント) |
 
 `receivePost` と `exchange` はどちらも成功時に要求の行を原子的に消費する (§9 手順 7)。同じ要求への 2 回目以降の応答は、
 経路を問わず `invalid_request` (404)、同時に届いた 2 件のうち負けた方は `request_used` (400)。検証に失敗した応答は消費しない。
@@ -170,8 +170,9 @@ CSP 付き。スクリプトは固定文字列で、exchange の URL・戻り先
 
 ### その他
 
-- `authorizationRequestUri(redirectUri, mode, nonce, scope?)` — 送り先 URL `https://<host>/<path>` を `concrnt-auth://<mode>/<host>/<path>?n=<nonce>[&s=<scope>]` にする (§5.2)。`start()` が両方返すので通常は不要
-- `audienceOf(redirectUri)` — 送り先 URL から ID Token の `aud` の期待値 (`https://<host>/<path>`) を作る
+- `deliveryUrl(redirectUri, nonce, scope?, query?)` — 送り先 URL (クエリ無し) に RP のクエリ・`n`・`s` を付けて完全な送り先 URL を作る (§5.2)
+- `authorizationRequestUri(url, mode)` — 完全な送り先 URL から `https://` を外して `concrnt-auth://<mode>/<rest>` にする。`<rest>` は加工しない。`start()` が両方返すので通常は不要
+- `audienceOf(url)` — 送り先 URL から ID Token の `aud` の期待値 (`https://<rest>`。`http://localhost` でも https 表記) を作る
 - `parseAuthorizationResponse(FormData | URLSearchParams | object)` — form / フラグメント / JSON body から `{ id_token, error, nonce }` を取り出す (他は無視)
 - `peekIdTokenNonce(token)` — 署名検証の前に payload の `nonce` だけ読む (要求の行を引くため)。JWT の形でなければ `null`
 - `verifyIdToken(token, { audience, nonce, now?, clockSkew? })` — §9 手順 1・3〜6 の単体。`aud` は `audience` と完全一致、`exp = iat + 300` を確認する
@@ -187,13 +188,14 @@ RP が持つ状態はストアの行だけで、どれも数分で消える。
   行のキーがそのまま応答の対応付けになる (`state` も要求ごとの URL も使わない)。
   `pollHash` はブラウザ秘密 `pollToken` の SHA-256 で、別端末フローの結果の宛先になる。`pollToken` 自体は QR にもストアにも載らないので、
   QR を見た第三者は結果を取れない (§8.1)
-- **要求は by-value** — Authorization Request URI は `concrnt-auth://<mode>/<host>/<redirectPath>?n=<nonce>` (70〜90 バイト前後) で、
+- **要求は by-value** — Authorization Request URI は `concrnt-auth://<mode>/<host>/<redirectPath>?<RP のクエリ>&n=<nonce>` (70〜90 バイト前後) で、
   Authenticator はこれだけで同意画面を出す。RP のエンドポイントを GET することは無いので、同意前に Authenticator の IP/UA が RP に渡らない。
   `display_code` は RP も Authenticator も `emojihash(nonce)` で導出する (付録 A)
 - **応答方式はサーバーに現れない** — `start()` が両方の `<mode>` の URI を返す。Authenticator は URI の `<mode>` に従って配送し、
   post のときだけ `display_code` の照合と別端末である旨の提示を出す
-- **aud は送り先 URL そのもの** — オリジンではない。攻撃者が `<path>` に RP オリジン上のオープンリダイレクタを指定して fragment の
-  トークンを横取りしても、`aud` が本物の送り先 URL と一致しないので使えない (§10)
+- **aud は送り先 URL そのもの** — `https://` + `<rest>` (RP のクエリ・`n`・`s` 込み) を発行時に行へ保存し、バイト一致を見る。
+  オリジンでもパスだけでもない。攻撃者が `<path>` に RP オリジン上のオープンリダイレクタを指定して fragment のトークンを横取りしても、
+  `aud` が本物の送り先 URL と一致しないので使えない (§10)。`s` を差し替えた URI も `aud` 不一致で落ちる
 - **受け口の役割が固定** — 送り先 URL への POST は「開始した人のために預かる」。`exchange` (fragment) は
   「提示した人をログインさせる」。どちらが来たかを判定したり、開始ブラウザとの一致を照合したりしない。
   他人に fragment のリンクを踏ませても、その人が自分のアカウントでログインするだけで、リンクを作った側には何も届かない (§10.1)

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { ConcrntAuth, audienceOf, authorizationRequestUri, parseAuthorizationResponse } from '../src/core.js'
+import { ConcrntAuth, audienceOf, authorizationRequestUri, deliveryUrl, parseAuthorizationResponse } from '../src/core.js'
 import { emojihash } from '../src/emojihash.js'
 import { AuthError } from '../src/errors.js'
 import { MemoryStore } from '../src/store.js'
@@ -52,18 +52,16 @@ describe('constructor', () => {
         expect(() => new ConcrntAuth({ origin, store, redirectPath: '/cb?x=1' })).toThrow('redirectPath')
         const custom = new ConcrntAuth({ origin: 'https://rp.example:8443', store })
         expect(custom.redirectUri).toBe('https://rp.example:8443/auth/callback')
-        expect(custom.audience).toBe('https://rp.example:8443/auth/callback')
     })
 
     it('allows http://localhost for development but keeps the identifier (aud) in https form', async () => {
         const local = new ConcrntAuth({ origin: 'http://localhost:5173', store, now })
         expect(local.redirectUri).toBe('http://localhost:5173/auth/callback')
-        expect(local.audience).toBe('https://localhost:5173/auth/callback')
         const started = await local.start()
         expect(started.postUri).toMatch(/^concrnt-auth:\/\/post\/localhost:5173\/auth\/callback\?n=[A-Za-z0-9_-]{22}$/)
         const request = parseRequestUri(started.postUri)
-        // Authenticator は仕様どおり aud = "https://" + host/path を入れる
-        await rejects(local.exchange({ id_token: issueIdToken(identity, { ...request, audience: 'http://localhost:5173/auth/callback' }, now()) }), 'invalid_id_token', 400)
+        // Authenticator は仕様どおり aud = "https://" + <rest> を入れる (localhost へ http で送っても aud は https)
+        await rejects(local.exchange({ id_token: issueIdToken(identity, { ...request, audience: `http://${request.rest}` }, now()) }), 'invalid_id_token', 400)
         expect((await local.exchange({ id_token: issueIdToken(identity, request, now()) })).status).toBe('ok')
     })
 })
@@ -94,7 +92,7 @@ describe('start', () => {
         expect((await ccidOnly.start()).postUri).toMatch(/\?n=[A-Za-z0-9_-]{22}&s=$/)
         const custom = new ConcrntAuth({ origin, store, now, scope: 'profile foo' })
         const started = await custom.start()
-        expect(started.postUri).toMatch(/&s=profile%20foo$/)
+        expect(started.postUri).toMatch(/&s=profile\+foo$/)
         expect(parseRequestUri(started.postUri).scope).toBe('profile foo')
     })
 
@@ -103,33 +101,62 @@ describe('start', () => {
         const started = await custom.start()
         expect(started.postUri).toMatch(/^concrnt-auth:\/\/post\/login-sample\.test\/x\/cb\?n=/)
         expect(started.exp).toBe(now() + 60)
-        expect(custom.audience).toBe(`${origin}/x/cb`)
+    })
+
+    it("carries the RP's own query in the delivery URL before n, and the whole <rest> becomes the aud", async () => {
+        const started = await auth.start(undefined, { query: { app: 'foo', return: '/settings?x=1&y=2' } })
+        expect(started.postUri).toMatch(/^concrnt-auth:\/\/post\/login-sample\.test\/auth\/callback\?app=foo&return=%2Fsettings%3Fx%3D1%26y%3D2&n=[A-Za-z0-9_-]{22}$/)
+        const request = parseRequestUri(started.postUri)
+        expect(request.query.get('return')).toBe('/settings?x=1&y=2')
+        // aud は <rest> 全体。クエリを剥がした・並べ替えた・s を足した aud は拒否
+        const result = await auth.exchange({ id_token: issueIdToken(identity, request, now()) })
+        expect(result.status).toBe('ok')
+        if (result.status !== 'ok') throw new Error('unreachable')
+        expect(result.claims.aud).toBe(`https://login-sample.test/auth/callback?app=foo&return=%2Fsettings%3Fx%3D1%26y%3D2&n=${request.nonce}`)
+
+        const again = await auth.start(undefined, { query: { app: 'foo' } })
+        const r2 = parseRequestUri(again.postUri)
+        for (const aud of [callback, `${callback}?n=${r2.nonce}`, `${callback}?n=${r2.nonce}&app=foo`, `https://${r2.rest}&s=`]) {
+            await rejects(auth.exchange({ id_token: issueIdToken(identity, { ...r2, audience: aud }, now()) }), 'invalid_id_token', 400)
+        }
+        expect((await auth.exchange({ id_token: issueIdToken(identity, r2, now()) })).status).toBe('ok')
+    })
+
+    it('rejects single-character names in the RP query (reserved) and a redirectPath with a query', async () => {
+        await rejects(auth.start(undefined, { query: { a: '1' } }), 'invalid_option', 500)
+        await rejects(auth.start(undefined, { query: { n: 'x' } }), 'invalid_option', 500)
+        expect(() => new ConcrntAuth({ origin, store, redirectPath: '/cb?app=1' })).toThrow('redirectPath')
     })
 })
 
-describe('authorizationRequestUri / audienceOf', () => {
+describe('deliveryUrl / authorizationRequestUri / audienceOf', () => {
     const nonce = 'atuQzACZAhdDWdWSKoLkIg'
 
-    it('builds the URI from the redirect URL and nonce', () => {
-        expect(authorizationRequestUri('https://example.com/api/auth/concrnt/callback', 'post', nonce)).toBe(
-            `concrnt-auth://post/example.com/api/auth/concrnt/callback?n=${nonce}`
+    it('builds the delivery URL (RP query, then n, then s) and the URI by stripping the scheme only', () => {
+        expect(deliveryUrl('https://example.com/api/auth/concrnt/callback', nonce)).toBe(`https://example.com/api/auth/concrnt/callback?n=${nonce}`)
+        expect(deliveryUrl('https://example.com:8443/cb', nonce, '')).toBe(`https://example.com:8443/cb?n=${nonce}&s=`)
+        expect(deliveryUrl('http://localhost/cb', nonce, 'profile x', { app: 'foo', return: '/settings' })).toBe(
+            `http://localhost/cb?app=foo&return=%2Fsettings&n=${nonce}&s=profile+x`
         )
-        expect(authorizationRequestUri('https://example.com:8443/cb', 'fragment', nonce, '')).toBe(`concrnt-auth://fragment/example.com:8443/cb?n=${nonce}&s=`)
-        expect(authorizationRequestUri('http://localhost/cb', 'post', nonce, 'profile x')).toBe(`concrnt-auth://post/localhost/cb?n=${nonce}&s=profile%20x`)
-        expect(audienceOf('http://127.0.0.1:3000/cb')).toBe('https://127.0.0.1:3000/cb')
+        expect(authorizationRequestUri(`https://example.com/cb?app=foo&return=/settings&n=${nonce}`, 'fragment')).toBe(
+            `concrnt-auth://fragment/example.com/cb?app=foo&return=/settings&n=${nonce}`
+        )
+        expect(audienceOf(`http://127.0.0.1:3000/cb?n=${nonce}`)).toBe(`https://127.0.0.1:3000/cb?n=${nonce}`)
         expect(audienceOf('https://example.com/cb')).toBe('https://example.com/cb')
     })
 
-    it('rejects unknown modes, bad nonces and redirect URLs the URI syntax cannot express', () => {
-        expect(() => authorizationRequestUri('https://x.test/a', 'direct_post' as never, nonce)).toThrow('unknown response type')
-        expect(() => authorizationRequestUri('https://x.test/a', 'post', 'short')).toThrow('nonce')
-        expect(() => authorizationRequestUri('http://x.test/a', 'post', nonce)).toThrow('must be https')
-        expect(() => authorizationRequestUri('https://user@x.test/a', 'post', nonce)).toThrow('userinfo')
-        expect(() => authorizationRequestUri('https://x.test', 'post', nonce)).toThrow('path must not be empty')
-        expect(() => authorizationRequestUri('https://x.test/', 'post', nonce)).toThrow('path must not be empty')
-        expect(() => authorizationRequestUri('https://x.test/a?b=1', 'post', nonce)).toThrow('query or fragment')
-        expect(() => authorizationRequestUri('https://x.test/a#f', 'post', nonce)).toThrow('query or fragment')
-        expect(() => authorizationRequestUri('nope', 'post', nonce)).toThrow('not a URL')
+    it('rejects unknown modes, bad nonces, reserved names and URLs the URI syntax cannot express', () => {
+        expect(() => authorizationRequestUri('https://x.test/a', 'direct_post' as never)).toThrow('unknown response type')
+        expect(() => deliveryUrl('https://x.test/a', 'short')).toThrow('nonce')
+        expect(() => deliveryUrl('https://x.test/a', nonce, undefined, { x: '1' })).toThrow('reserved')
+        expect(() => deliveryUrl('https://x.test/a?b=1', nonce)).toThrow('query or fragment')
+        expect(() => deliveryUrl('https://x.test/a#f', nonce)).toThrow('query or fragment')
+        expect(() => authorizationRequestUri('http://x.test/a', 'post')).toThrow('must be https')
+        expect(() => authorizationRequestUri('https://user@x.test/a', 'post')).toThrow('userinfo')
+        expect(() => authorizationRequestUri('https://x.test', 'post')).toThrow('path must not be empty')
+        expect(() => authorizationRequestUri('https://x.test/', 'post')).toThrow('path must not be empty')
+        expect(() => authorizationRequestUri('https://x.test/a#f', 'post')).toThrow('fragment')
+        expect(() => authorizationRequestUri('nope', 'post')).toThrow('not a URL')
     })
 })
 
@@ -146,7 +173,7 @@ describe('receivePost / exchange / pollResult', () => {
         expect(result?.status).toBe('ok')
         if (result?.status !== 'ok') throw new Error('unreachable')
         expect(result.claims.sub).toBe(identity.ccid)
-        expect(result.claims.aud).toBe(callback)
+        expect(result.claims.aud).toBe(`${callback}?n=${nonceOf(started)}`)
         expect(result.claims.name).toBe('Test User')
         expect(result.idToken).toBe(params.id_token)
         expect(result.context).toBeUndefined()
@@ -214,8 +241,8 @@ describe('receivePost / exchange / pollResult', () => {
         await rejects(auth.exchange({ id_token: 'x' }), 'invalid_id_token', 400)
         // 正しく署名されているが、こちらが発行していない nonce → 行が無い (偽造 URI のトークンはここで捨てられる)
         await rejects(auth.exchange({ id_token: issueIdToken(identity, { ...request, nonce: 'AAAAAAAAAAAAAAAAAAAAAA' }, now()) }), 'invalid_request', 404)
-        // aud 違い: オリジンだけ・末尾スラッシュ・オープンリダイレクタ経由・他ホストの同じパス
-        for (const aud of [origin, `${callback}/`, `${origin}/redirect?to=${encodeURIComponent(callback)}`, 'https://evil.test/auth/callback']) {
+        // aud 違い: オリジンだけ・クエリ無し・末尾スラッシュ・オープンリダイレクタ経由・他ホストの同じ <rest>
+        for (const aud of [origin, callback, `${callback}/?n=${request.nonce}`, `${origin}/redirect?to=${encodeURIComponent(callback)}&n=${request.nonce}`, `https://evil.test/${request.rest.slice(request.rest.indexOf('/') + 1)}`]) {
             await rejects(auth.exchange({ id_token: issueIdToken(identity, { ...request, audience: aud }, now()) }), 'invalid_id_token', 400)
         }
         // exp は iat + 300 固定
