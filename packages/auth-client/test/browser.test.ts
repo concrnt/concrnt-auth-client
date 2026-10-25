@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { runLogin, type LoginStartResponse } from '../src/browser.js'
 
 const started: LoginStartResponse = {
-    directPostUri: 'concrnt-auth://direct_post/rp.test/auth/request/C',
-    fragmentUri: 'concrnt-auth://fragment/rp.test/auth/request/C',
+    postUri: 'concrnt-auth://post/rp.test/auth/callback?n=atuQzACZAhdDWdWSKoLkIg',
+    fragmentUri: 'concrnt-auth://fragment/rp.test/auth/callback?n=atuQzACZAhdDWdWSKoLkIg',
     displayCode: '🍣',
     exp: 1_000_300,
     pollToken: 'secret'
@@ -22,7 +22,7 @@ describe('runLogin', () => {
         })
         const result = await runLogin<Res>({ start: async () => started, poll, onChallenge, pollIntervalMs: 1, now: () => clock })
         expect(result).toEqual({ status: 'ok', user: 'alice' })
-        expect(onChallenge).toHaveBeenCalledWith({ directPostUri: started.directPostUri, fragmentUri: started.fragmentUri, displayCode: '🍣', exp: started.exp })
+        expect(onChallenge).toHaveBeenCalledWith({ postUri: started.postUri, fragmentUri: started.fragmentUri, displayCode: '🍣', exp: started.exp })
         expect(poll).toHaveBeenCalledTimes(3)
     })
 

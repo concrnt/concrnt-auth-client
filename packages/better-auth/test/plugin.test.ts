@@ -2,22 +2,21 @@ import { describe, expect, it } from 'vitest'
 import { LANDING_SCRIPT } from '@concrnt/auth-client'
 import {
     call,
-    challengeOf,
+    CALLBACK_URL,
     cookiesOf,
     createTestAuth,
-    directPost,
-    directPostFlow,
     exchange,
-    fetchRequestObject,
     getSession,
     hasSessionCookie,
     idTokenFor,
     json,
     listAccounts,
     makeIdentity,
+    nonceOf,
     ORIGIN,
     poll,
-    requestUriOf,
+    post,
+    postFlow,
     signUpUser,
     start
 } from './helpers.js'
@@ -25,56 +24,47 @@ import {
 const alice = makeIdentity()
 const bob = makeIdentity()
 
-describe('start / request object', () => {
-    it('issues both Authorization Request URIs from one request and a Request Object under basePath', async () => {
+describe('start', () => {
+    it('issues both Authorization Request URIs (by-value, under basePath) from one request', async () => {
         const auth = await createTestAuth()
         const { res, started } = await start(auth)
         expect(res.status).toBe(200)
-        expect(started!.directPostUri).toMatch(/^concrnt-auth:\/\/direct_post\/rp\.test\/api\/auth\/concrnt\/request\/[A-Za-z0-9_-]{22}$/)
-        const C = challengeOf(started!)
-        expect(started!.fragmentUri).toBe(`concrnt-auth://fragment/rp.test/api/auth/concrnt/request/${C}`)
+        expect(started!.postUri).toMatch(/^concrnt-auth:\/\/post\/rp\.test\/api\/auth\/concrnt\/callback\?n=[A-Za-z0-9_-]{22}$/)
+        const nonce = nonceOf(started!)
+        expect(started!.fragmentUri).toBe(`concrnt-auth://fragment/rp.test/api/auth/concrnt/callback?n=${nonce}`)
         expect(started!.displayCode).toMatch(/\p{Extended_Pictographic}/u)
         expect(started!.pollToken).toHaveLength(43)
         expect(started!.exp).toBeGreaterThan(Date.now() / 1000 + 200)
         expect(started!).not.toHaveProperty('requestUri')
-
-        const roRes = await call(auth, 'GET', requestUriOf(started!))
-        expect(roRes.headers.get('access-control-allow-origin')).toBe('*')
-        expect(roRes.headers.get('cache-control')).toContain('no-store')
-        const ro = await json(roRes)
-        expect(ro).toMatchObject({
-            redirect_uri: `${ORIGIN}/api/auth/concrnt/callback/${C}`,
-            response_type: 'id_token',
-            scope: 'openid profile',
-            exp: started!.exp,
-            display_code: started!.displayCode,
-            client_metadata: { client_name: 'Test RP' }
-        })
-        expect((ro as { nonce: string }).nonce).toHaveLength(43)
-        expect(ro).not.toHaveProperty('response_mode')
+        expect(started!).not.toHaveProperty('challenge')
+        expect(started!).not.toHaveProperty('directPostUri')
+        // Request Object のエンドポイントは無い
+        expect((await call(auth, 'GET', `/concrnt/request/${nonce}`)).ok).toBe(false)
     })
 
-    it('rejects unknown challenges with 404 CHALLENGE_NOT_FOUND', async () => {
+    it('rejects responses for unknown nonces with 404 REQUEST_NOT_FOUND', async () => {
         const auth = await createTestAuth()
-        const res = await call(auth, 'GET', '/concrnt/request/AAAAAAAAAAAAAAAAAAAAAA')
+        const res = await post(auth, { id_token: idTokenFor(alice, 'AAAAAAAAAAAAAAAAAAAAAA') })
         expect(res.status).toBe(404)
-        expect(await json(res)).toMatchObject({ code: 'CHALLENGE_NOT_FOUND' })
+        expect(await json(res)).toMatchObject({ code: 'REQUEST_NOT_FOUND' })
+        const denied = await post(auth, { error: 'access_denied', nonce: 'AAAAAAAAAAAAAAAAAAAAAA' })
+        expect(denied.status).toBe(404)
     })
 
     it('validates callbackURL against trustedOrigins and echoes it on completion', async () => {
         const auth = await createTestAuth()
         expect((await start(auth, { callbackURL: 'https://evil.test/x' })).res.status).toBe(403)
-        const { polled } = await directPostFlow(auth, alice, { callbackURL: 'https://app.test/done' })
+        const { polled } = await postFlow(auth, alice, { callbackURL: 'https://app.test/done' })
         expect(await json(polled)).toMatchObject({ status: 'ok', callbackURL: 'https://app.test/done' })
-        const rel = await directPostFlow(auth, alice, { callbackURL: '/after' })
+        const rel = await postFlow(auth, alice, { callbackURL: '/after' })
         expect(await json(rel.polled)).toMatchObject({ status: 'ok', callbackURL: '/after' })
     })
 })
 
-describe('sign-in (direct_post)', () => {
+describe('sign-in (post)', () => {
     it('signs up an unknown CCID as a new user with a placeholder email and a concrnt account row', async () => {
         const auth = await createTestAuth()
-        const { started, posted, polled } = await directPostFlow(auth, alice)
+        const { started, posted, polled } = await postFlow(auth, alice)
         expect(posted.status).toBe(204)
         expect(posted.headers.get('set-cookie')).toBeNull()
         expect(posted.headers.get('access-control-allow-origin')).toBe('*')
@@ -96,11 +86,11 @@ describe('sign-in (direct_post)', () => {
     it('signs an existing CCID into the same user and reports isNewUser / newUserCallbackURL', async () => {
         const auth = await createTestAuth()
         const first = await json<{ user: { id: string }; isNewUser: boolean; callbackURL: string }>(
-            (await directPostFlow(auth, alice, { callbackURL: '/home', newUserCallbackURL: '/welcome' })).polled
+            (await postFlow(auth, alice, { callbackURL: '/home', newUserCallbackURL: '/welcome' })).polled
         )
         expect(first).toMatchObject({ isNewUser: true, callbackURL: '/welcome' })
         const second = await json<{ user: { id: string }; isNewUser: boolean; callbackURL: string }>(
-            (await directPostFlow(auth, alice, { callbackURL: '/home', newUserCallbackURL: '/welcome' })).polled
+            (await postFlow(auth, alice, { callbackURL: '/home', newUserCallbackURL: '/welcome' })).polled
         )
         expect(second).toMatchObject({ isNewUser: false, callbackURL: '/home' })
         expect(second.user.id).toBe(first.user.id)
@@ -110,83 +100,94 @@ describe('sign-in (direct_post)', () => {
 
     it("rejects unknown CCIDs with 403 SIGNUP_DISABLED when signUp is 'disabled' and creates nothing", async () => {
         const auth = await createTestAuth({ signUp: 'disabled' })
-        const { polled } = await directPostFlow(auth, bob)
+        const { polled } = await postFlow(auth, bob)
         expect(polled.status).toBe(403)
         expect(await json(polled)).toMatchObject({ code: 'SIGNUP_DISABLED' })
         expect(hasSessionCookie(polled)).toBe(false)
     })
 
-    it('reports denied without a session', async () => {
+    it('reports denied (error=access_denied&nonce=…) without a session', async () => {
         const auth = await createTestAuth()
         const { started } = await start(auth, { callbackURL: '/login' })
-        const ro = await fetchRequestObject(auth, started!)
-        expect((await directPost(auth, ro, { error: 'access_denied' })).status).toBe(204)
+        expect((await post(auth, { error: 'access_denied', nonce: nonceOf(started!) })).status).toBe(204)
         const polled = await poll(auth, started!)
         expect(await json(polled)).toEqual({ status: 'denied', callbackURL: '/login' })
         expect(hasSessionCookie(polled)).toBe(false)
     })
 
-    it('rejects replays on either route once a response is accepted (§9 step 3)', async () => {
+    it('rejects a denial without a nonce with 400 MISSING_NONCE and keeps the request', async () => {
         const auth = await createTestAuth()
-        const { ro, posted, started } = await directPostFlow(auth, alice)
+        const { started } = await start(auth)
+        const res = await post(auth, { error: 'access_denied' })
+        expect(res.status).toBe(400)
+        expect(await json(res)).toMatchObject({ code: 'MISSING_NONCE' })
+        expect((await post(auth, { id_token: idTokenFor(alice, nonceOf(started!)) })).status).toBe(204)
+    })
+
+    it('rejects replays on either route once a response is accepted (§9 step 7)', async () => {
+        const auth = await createTestAuth()
+        const { nonce, posted } = await postFlow(auth, alice)
         expect(posted.status).toBe(204)
-        const again = await directPost(auth, ro, { id_token: idTokenFor(alice, ro) })
+        const again = await post(auth, { id_token: idTokenFor(alice, nonce) })
         expect(again.status).toBe(404)
-        expect(await json(again)).toMatchObject({ code: 'CHALLENGE_NOT_FOUND' })
-        const viaFragment = await exchange(auth, ro, { id_token: idTokenFor(alice, ro) })
+        expect(await json(again)).toMatchObject({ code: 'REQUEST_NOT_FOUND' })
+        const viaFragment = await exchange(auth, { id_token: idTokenFor(alice, nonce) })
         expect(viaFragment.status).toBe(404)
         expect(hasSessionCookie(viaFragment)).toBe(false)
-        expect((await call(auth, 'GET', requestUriOf(started))).status).toBe(404)
     })
 
     it('accepts exactly one of two concurrent valid responses (atomic consume)', async () => {
         const auth = await createTestAuth()
         const { started } = await start(auth)
-        const ro = await fetchRequestObject(auth, started!)
-        const results = await Promise.all([directPost(auth, ro, { id_token: idTokenFor(alice, ro) }), directPost(auth, ro, { id_token: idTokenFor(alice, ro) })])
+        const nonce = nonceOf(started!)
+        const results = await Promise.all([post(auth, { id_token: idTokenFor(alice, nonce) }), post(auth, { id_token: idTokenFor(alice, nonce) })])
         expect(results.map((r) => r.status).sort()).toEqual([204, 400])
-        expect(await json(results.find((r) => r.status === 400)!)).toMatchObject({ code: 'CHALLENGE_ALREADY_USED' })
+        expect(await json(results.find((r) => r.status === 400)!)).toMatchObject({ code: 'REQUEST_ALREADY_USED' })
     })
 
     it('does not consume the request on invalid or missing id_token', async () => {
         const auth = await createTestAuth()
         const { started } = await start(auth)
-        const ro = await fetchRequestObject(auth, started!)
-        const missing = await directPost(auth, ro, { foo: 'bar' })
+        const nonce = nonceOf(started!)
+        const missing = await post(auth, { foo: 'bar' })
         expect(missing.status).toBe(400)
         expect(await json(missing)).toMatchObject({ code: 'MISSING_ID_TOKEN' })
-        const wrongAud = await directPost(auth, ro, { id_token: idTokenFor(alice, ro, { claims: { aud: 'https://other.test' } }) })
+        // aud はオリジンではなく送り先 URL
+        const originOnly = await post(auth, { id_token: idTokenFor(alice, nonce, { claims: { aud: ORIGIN } }) })
+        expect(originOnly.status).toBe(400)
+        expect(await json(originOnly)).toMatchObject({ code: 'INVALID_ID_TOKEN' })
+        const wrongAud = await post(auth, { id_token: idTokenFor(alice, nonce, { claims: { aud: 'https://other.test/api/auth/concrnt/callback' } }) })
         expect(wrongAud.status).toBe(400)
-        expect(await json(wrongAud)).toMatchObject({ code: 'INVALID_ID_TOKEN' })
-        const wrongNonce = await directPost(auth, ro, { id_token: idTokenFor(alice, ro, { claims: { nonce: 'x' } }) })
-        expect(wrongNonce.status).toBe(400)
-        const withKid = await directPost(auth, ro, { id_token: idTokenFor(alice, ro, { header: { kid: 'x' } }) })
+        const shortExp = await post(auth, { id_token: idTokenFor(alice, nonce, { claims: { exp: Math.floor(Date.now() / 1000) + 299 } }) })
+        expect(shortExp.status).toBe(400)
+        expect(await json(shortExp)).toMatchObject({ code: 'INVALID_ID_TOKEN', message: expect.stringContaining('iat + 300') })
+        const withKid = await post(auth, { id_token: idTokenFor(alice, nonce, { header: { kid: 'x' } }) })
         expect(withKid.status).toBe(400)
-        expect((await directPost(auth, ro, { id_token: idTokenFor(alice, ro) })).status).toBe(204)
+        const garbage = await post(auth, { id_token: 'not.a.jwt' })
+        expect(garbage.status).toBe(400)
+        expect(await json(garbage)).toMatchObject({ code: 'INVALID_ID_TOKEN' })
+        expect((await post(auth, { id_token: idTokenFor(alice, nonce) })).status).toBe(204)
     })
 
-    it('also accepts JSON bodies on the direct_post endpoint and rejects unknown media types', async () => {
+    it('also accepts JSON bodies on the post endpoint and rejects unknown media types', async () => {
         const auth = await createTestAuth()
         const { started } = await start(auth)
-        const ro = await fetchRequestObject(auth, started!)
-        const asText = await call(auth, 'POST', ro.redirect_uri, { headers: { 'content-type': 'text/plain' }, authenticator: true })
+        const asText = await call(auth, 'POST', CALLBACK_URL, { headers: { 'content-type': 'text/plain' }, authenticator: true })
         expect(asText.ok).toBe(false)
-        expect((await call(auth, 'POST', ro.redirect_uri, { json: { id_token: idTokenFor(alice, ro) }, authenticator: true })).status).toBe(204)
+        expect((await call(auth, 'POST', CALLBACK_URL, { json: { id_token: idTokenFor(alice, nonceOf(started!)) }, authenticator: true })).status).toBe(204)
     })
 })
 
 describe('sign-in (fragment)', () => {
-    it('serves the landing page at redirect_uri with a CSP that allows only its own script', async () => {
+    it('serves the landing page at the callback URL with a CSP that allows only its own script', async () => {
         const auth = await createTestAuth()
-        const { started } = await start(auth)
-        const ro = await fetchRequestObject(auth, started!)
-        const res = await call(auth, 'GET', ro.redirect_uri)
+        const res = await call(auth, 'GET', CALLBACK_URL)
         expect(res.status).toBe(200)
         expect(res.headers.get('content-type')).toContain('text/html')
         expect(res.headers.get('cache-control')).toBe('no-store')
         const html = await res.text()
         expect(html).toContain(LANDING_SCRIPT)
-        expect(html).toContain(`data-exchange="https://rp.test/api/auth/concrnt/exchange/${challengeOf(started!)}"`)
+        expect(html).toContain('data-exchange="https://rp.test/api/auth/concrnt/exchange"')
         const digest = Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(LANDING_SCRIPT))).toString('base64')
         expect(res.headers.get('content-security-policy')).toContain(`script-src 'sha256-${digest}'`)
         expect(res.headers.get('content-security-policy')).toContain("connect-src 'self'")
@@ -194,10 +195,9 @@ describe('sign-in (fragment)', () => {
 
     it('exchange logs in the presenting browser and never feeds the starting browser (§8.2)', async () => {
         const auth = await createTestAuth()
-        const owner = await json<{ user: { id: string } }>((await directPostFlow(auth, alice)).polled)
+        const owner = await json<{ user: { id: string } }>((await postFlow(auth, alice)).polled)
         const { started } = await start(auth, { callbackURL: '/home' })
-        const ro = await fetchRequestObject(auth, started!)
-        const res = await exchange(auth, ro, { id_token: idTokenFor(alice, ro), error: null })
+        const res = await exchange(auth, { id_token: idTokenFor(alice, nonceOf(started!)), error: null })
         expect(res.status).toBe(200)
         expect(hasSessionCookie(res)).toBe(true)
         expect(await json(res)).toMatchObject({ status: 'ok', callbackURL: '/home', user: { id: owner.user.id } })
@@ -209,12 +209,10 @@ describe('sign-in (fragment)', () => {
     it("exchange reports denied and honours signUp: 'disabled'", async () => {
         const auth = await createTestAuth({ signUp: 'disabled' })
         const { started } = await start(auth)
-        const ro = await fetchRequestObject(auth, started!)
-        const denied = await exchange(auth, ro, { error: 'access_denied' })
+        const denied = await exchange(auth, { error: 'access_denied', nonce: nonceOf(started!) })
         expect(await json(denied)).toEqual({ status: 'denied', callbackURL: '/' })
         const s2 = (await start(auth)).started!
-        const ro2 = await fetchRequestObject(auth, s2)
-        const unknown = await exchange(auth, ro2, { id_token: idTokenFor(bob, ro2) })
+        const unknown = await exchange(auth, { id_token: idTokenFor(bob, nonceOf(s2)) })
         expect(unknown.status).toBe(403)
         expect(await json(unknown)).toMatchObject({ code: 'SIGNUP_DISABLED' })
     })
@@ -223,9 +221,9 @@ describe('sign-in (fragment)', () => {
 describe("signUp: 'confirm'", () => {
     const pendingCookieOf = (res: Response): string | undefined => res.headers.getSetCookie().find((c) => c.includes('concrnt_signup=') && !/concrnt_signup=;/.test(c))
 
-    it('holds an unknown CCID instead of creating it, and creates it on sign-up (direct_post)', async () => {
+    it('holds an unknown CCID instead of creating it, and creates it on sign-up (post)', async () => {
         const auth = await createTestAuth({ signUp: 'confirm' })
-        const { polled } = await directPostFlow(auth, alice, { callbackURL: '/home', newUserCallbackURL: '/welcome' })
+        const { polled } = await postFlow(auth, alice, { callbackURL: '/home', newUserCallbackURL: '/welcome' })
         expect(polled.status).toBe(200)
         expect(hasSessionCookie(polled)).toBe(false)
         expect(pendingCookieOf(polled)).toMatch(/HttpOnly/)
@@ -256,15 +254,14 @@ describe("signUp: 'confirm'", () => {
         expect(await json(again)).toMatchObject({ code: 'NO_PENDING_SIGNUP' })
 
         // 登録済みになった CCID は確認なしでログインできる
-        const login = await directPostFlow(auth, alice)
+        const login = await postFlow(auth, alice)
         expect(await json(login.polled)).toMatchObject({ status: 'ok', isNewUser: false })
     })
 
     it('holds on the fragment route too, and a new login discards the pending sign-up', async () => {
         const auth = await createTestAuth({ signUp: 'confirm' })
         const { started } = await start(auth)
-        const ro = await fetchRequestObject(auth, started!)
-        const res = await exchange(auth, ro, { id_token: idTokenFor(bob, ro) })
+        const res = await exchange(auth, { id_token: idTokenFor(bob, nonceOf(started!)) })
         expect(await json(res)).toMatchObject({ status: 'signup_required', profile: { ccid: bob.ccid } })
         expect(hasSessionCookie(res)).toBe(false)
         const browser = cookiesOf(res)
@@ -288,13 +285,13 @@ describe("signUp: 'confirm'", () => {
 describe('existing users', () => {
     it('a logged-in browser signing in with another CCID switches to that CCID\'s user instead of linking', async () => {
         const auth = await createTestAuth()
-        const owner = await json<{ user: { id: string } }>((await directPostFlow(auth, alice)).polled)
+        const owner = await json<{ user: { id: string } }>((await postFlow(auth, alice)).polled)
         const other = await signUpUser(auth)
-        const { polled } = await directPostFlow(auth, alice, {}, other.headers)
+        const { polled } = await postFlow(auth, alice, {}, other.headers)
         expect(await json(polled)).toMatchObject({ status: 'ok', user: { id: owner.user.id } })
         expect(await listAccounts(auth, other.headers)).toHaveLength(1)
         // 未登録の CCID でも、ログイン中のユーザーに付くのではなく新しいユーザーになる (1 ユーザーに CCID は 1 つ)
-        const fresh = await json<{ user: { id: string }; isNewUser: boolean }>((await directPostFlow(auth, bob, {}, other.headers)).polled)
+        const fresh = await json<{ user: { id: string }; isNewUser: boolean }>((await postFlow(auth, bob, {}, other.headers)).polled)
         expect(fresh.isNewUser).toBe(true)
         expect(fresh.user.id).not.toBe(other.user.id)
         expect(await listAccounts(auth, other.headers)).toHaveLength(1)
@@ -302,7 +299,7 @@ describe('existing users', () => {
 
     it('unlinking is better-auth\'s own endpoint and refuses to remove the last account', async () => {
         const auth = await createTestAuth()
-        const polled = (await directPostFlow(auth, alice)).polled
+        const polled = (await postFlow(auth, alice)).polled
         const headers = cookiesOf(polled)
         const [account] = await listAccounts(auth, headers)
         const res = await call(auth, 'POST', '/unlink-account', { json: { accountId: account!.id }, headers })
@@ -324,8 +321,7 @@ describe('status endpoint', () => {
     it('cannot be reached by a cross-site HTML form (login CSRF)', async () => {
         const auth = await createTestAuth()
         const { started } = await start(auth)
-        const ro = await fetchRequestObject(auth, started!)
-        await directPost(auth, ro, { id_token: idTokenFor(alice, ro) })
+        await post(auth, { id_token: idTokenFor(alice, nonceOf(started!)) })
         const form = await auth.handler(
             new Request(`${ORIGIN}/api/auth/concrnt/status`, {
                 method: 'POST',

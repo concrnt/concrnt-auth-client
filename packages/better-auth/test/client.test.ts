@@ -2,7 +2,7 @@
 import { createAuthClient } from 'better-auth/client'
 import { describe, expect, it } from 'vitest'
 import { concrntClient, type ConcrntChallenge } from '../src/client.js'
-import { createTestAuth, directPost, fetchRequestObject, idTokenFor, makeIdentity, ORIGIN, requestUriOf, type Started, type TestAuth } from './helpers.js'
+import { createTestAuth, idTokenFor, makeIdentity, nonceOf, ORIGIN, post, type Started, type TestAuth } from './helpers.js'
 
 const alice = makeIdentity()
 
@@ -20,11 +20,10 @@ const createClient = (auth: TestAuth, cookie?: string) =>
         }
     })
 
-/** Authenticator 役: QR を読んで応答する */
-const answer = (auth: TestAuth, c: ConcrntChallenge, form: (ro: Awaited<ReturnType<typeof fetchRequestObject>>) => Record<string, string>) =>
+/** Authenticator 役: QR (URI) を読んで応答する。RP への取得は無い */
+const answer = (auth: TestAuth, c: ConcrntChallenge, form: (nonce: string) => Record<string, string>) =>
     void (async () => {
-        const ro = await fetchRequestObject(auth, { directPostUri: c.directPostUri } as Started)
-        await directPost(auth, ro, form(ro))
+        await post(auth, form(nonceOf({ postUri: c.postUri } as Started)))
     })()
 
 describe('concrntClient', () => {
@@ -37,12 +36,12 @@ describe('concrntClient', () => {
             pollIntervalMs: 20,
             onChallenge: (c) => {
                 challenges.push(c)
-                answer(auth, c, (ro) => ({ id_token: idTokenFor(alice, ro) }))
+                answer(auth, c, (nonce) => ({ id_token: idTokenFor(alice, nonce) }))
             }
         })
         expect(challenges).toHaveLength(1)
         expect(challenges[0]).toMatchObject({ displayCode: expect.stringMatching(/\p{Extended_Pictographic}/u) })
-        expect(requestUriOf({ directPostUri: challenges[0]!.directPostUri } as Started)).toMatch(/^https:\/\/rp\.test\/api\/auth\/concrnt\/request\//)
+        expect(challenges[0]!.postUri).toMatch(/^concrnt-auth:\/\/post\/rp\.test\/api\/auth\/concrnt\/callback\?n=[A-Za-z0-9_-]{22}$/)
         expect(result.error).toBeNull()
         expect(result.data).toMatchObject({ status: 'ok', callbackURL: '/after', user: { name: 'Test User' } })
     })
@@ -50,7 +49,7 @@ describe('concrntClient', () => {
     it('resolves denied / expired / aborted without throwing', async () => {
         const auth = await createTestAuth()
         const client = createClient(auth)
-        const denied = await client.signIn.concrnt({ pollIntervalMs: 20, onChallenge: (c) => answer(auth, c, () => ({ error: 'access_denied' })) })
+        const denied = await client.signIn.concrnt({ pollIntervalMs: 20, onChallenge: (c) => answer(auth, c, (nonce) => ({ error: 'access_denied', nonce })) })
         expect(denied.data).toEqual({ status: 'denied', callbackURL: '/' })
 
         const ac = new AbortController()
@@ -82,7 +81,7 @@ describe('concrntClient', () => {
                 }
             }
         })
-        const held = await client.signIn.concrnt({ pollIntervalMs: 20, onChallenge: (c) => answer(auth, c, (ro) => ({ id_token: idTokenFor(alice, ro) })) })
+        const held = await client.signIn.concrnt({ pollIntervalMs: 20, onChallenge: (c) => answer(auth, c, (nonce) => ({ id_token: idTokenFor(alice, nonce) })) })
         expect(held.data).toMatchObject({ status: 'signup_required', profile: { ccid: alice.ccid, name: 'Test User' } })
         expect((await client.concrnt.pendingSignUp()).data).toMatchObject({ profile: { ccid: alice.ccid } })
         const created = await client.concrnt.signUp()

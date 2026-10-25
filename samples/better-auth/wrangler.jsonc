@@ -15,7 +15,7 @@
 		"enabled": true
 	},
 	"upload_source_maps": true,
-	// better-auth のテーブル (user / session / account / verification) とプラグインの concrntIdentity。
+	// better-auth の標準テーブル (user / session / account / verification) だけ。プラグイン固有のテーブルは無い。
 	// スキーマは migrations/ (pnpm generate-migration で再生成) を `pnpm migrate:local` / `migrate:remote` で適用する。
 	// 別のアカウントにデプロイするときは `wrangler d1 create auth-client-better-auth-sample` で作り直して database_id を差し替える。
 	// ローカル開発 (pnpm dev) ではエミュレートされるので id はそのままでよい
@@ -29,8 +29,8 @@
 	],
 	// BETTER_AUTH_SECRET は vars ではなく `wrangler secret put BETTER_AUTH_SECRET` で与える (ローカルは .dev.vars)
 	"vars": {
-		// RP のオリジン (CIP-17 §5.1)。request_uri / redirect_uri / ID Token の aud に使う。Authorization Request URI には
-		// host しか載らず https が暗黙なので http では成立しない。空ならリクエストのオリジンを使う。
+		// RP のオリジン。送り先 URL (= RP の識別子・ID Token の aud、CIP-17 §5.1) は `${origin}/api/auth/concrnt/callback`。
+		// Authorization Request URI には host/path しか載らず https が暗黙なので http では成立しない。空ならリクエストのオリジンを使う。
 		// ローカル開発でトンネル等を使うときは .dev.vars で上書きする
 		"PUBLIC_ORIGIN": ""
 	}

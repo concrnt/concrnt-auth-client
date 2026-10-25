@@ -3,7 +3,6 @@ import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { keccak_256 } from '@noble/hashes/sha3.js'
 import { base64urlnopad } from '@scure/base'
 import { ccidFromPublicKey } from '../src/verify.js'
-import type { RequestObject } from '../src/types.js'
 
 export interface TestIdentity {
     privateKey: Uint8Array
@@ -37,12 +36,28 @@ export interface IdTokenOverrides {
     mutateSignature?: (sig: Uint8Array) => void
 }
 
-export const issueIdToken = (identity: TestIdentity, request: RequestObject, origin: string, now: number, overrides: IdTokenOverrides = {}): string => {
+/** Authorization Request URI から読み取った要求。nonce は `n`、audience は "https://" + <host>/<path> */
+export interface TestRequest {
+    nonce: string
+    audience: string
+}
+
+/** URI (concrnt-auth://<type>/<host>/<path>?n=…) を Authenticator と同じように解釈する */
+export const parseRequestUri = (uri: string): TestRequest & { mode: string; scope: string | null; redirectUri: string } => {
+    const m = /^concrnt-auth:\/\/([^/]+)\/([^?#]+)\?(.*)$/.exec(uri)
+    if (!m) throw new Error(`not an Authorization Request URI: ${uri}`)
+    const query = new URLSearchParams(m[3]!)
+    const nonce = query.get('n')
+    if (!nonce) throw new Error('n is required')
+    return { mode: m[1]!, nonce, scope: query.get('s'), audience: `https://${m[2]!}`, redirectUri: `https://${m[2]!}` }
+}
+
+export const issueIdToken = (identity: TestIdentity, request: TestRequest, now: number, overrides: IdTokenOverrides = {}): string => {
     const header = { alg: 'CONCRNT', typ: 'JWT', ...overrides.header }
     const claims = {
         iss: identity.ccid,
         sub: identity.ccid,
-        aud: origin,
+        aud: request.audience,
         nonce: request.nonce,
         iat: now,
         exp: now + 300,

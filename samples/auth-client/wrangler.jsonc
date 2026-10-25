@@ -5,7 +5,7 @@
 	"compatibility_date": "2026-10-19",
 	"assets": {
 		"not_found_handling": "single-page-application",
-		// /auth/* (request_uri・redirect_uri・fragment の着地ページ) と /api/* は Worker が返す。
+		// /auth/* (送り先 URL = post の受け口と fragment の着地ページ) と /api/* は Worker が返す。
 		// これが無いと compatibility_date >= 2025-04-01 では navigation GET が Worker を通らず index.html になる
 		"run_worker_first": ["/api/*", "/auth/*"]
 	},
@@ -28,9 +28,9 @@
 		}
 	],
 	"vars": {
-		// RP のオリジン (CIP-17 §5.1)。request_uri / redirect_uri / ID Token の aud に使う。Authorization Request URI には
-		// host しか載らず https が暗黙なので http では成立しない。空ならリクエストのオリジンを使う。
-		// ローカル開発でトンネル等を使うときは .dev.vars で上書きする。
+		// RP のオリジン。送り先 URL (= RP の識別子・ID Token の aud、CIP-17 §5.1) は `${origin}/auth/callback`。Authorization Request URI には
+		// host/path しか載らず https が暗黙なので http では成立しない (Authenticator が http で送ってよいのは localhost だけ)。
+		// 空ならリクエストのオリジンを使う。ローカル開発でトンネル等を使うときは .dev.vars で上書きする。
 		"PUBLIC_ORIGIN": ""
 	}
 }

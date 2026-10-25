@@ -4,56 +4,50 @@
 //   ブラウザ (RP フロント)        RP サーバー (このクラスの利用側)            Authenticator (world-app)
 //   ---------------------        -------------------------------            -------------------------
 //   ログイン開始 --------------> start()                   要求の行を置き、QR 用とリンク用の URI と pollToken を返す
-//   QR (direct_post) / リンク (fragment) に
-//                                                          <-QR/link-- GET  request_uri      → getRequestObject(C)
-//   --- 別端末 (direct_post, §8.1) ---
-//                                                          <----------- POST redirect_uri    → receiveDirectPost(C, params) → 結果を預ける
+//   QR (post) / リンク (fragment) に         (Authenticator は URI だけで同意画面を出す。RP への取得は無い)
+//   --- 別端末 (post, §8.1) ---
+//                                                          <----------- POST 送り先 URL     → receivePost(params) → 結果を預ける
 //   ポーリング ----------------> pollResult(pollToken)     結果を回収する。利用側がこのブラウザにセッションを発行する
 //   --- 同一端末 (fragment, §8.2) ---
-//   redirect_uri#id_token=… で開かれたブラウザが
-//   フラグメントを送る --------> exchange(C, params)       検証して結果を返す。利用側がこの呼び出し元にセッションを発行する
+//   送り先 URL#id_token=… で開かれたブラウザが
+//   フラグメントを送る --------> exchange(params)          検証して結果を返す。利用側がこの呼び出し元にセッションを発行する
 //
 // 応答方式 (§8) を選ぶのはブラウザで、サーバーは関知しない。受け口の役割が固定されているので判定も要らない:
-//   redirect_uri への POST は「開始した人のために預かる」(叩いた側には何も発行しない)
+//   送り先 URL への POST は「開始した人のために預かる」(叩いた側には何も発行しない)
 //   exchange は「提示した人をログインさせる」(預け先には触らない)
-// redirect_uri は要求ごとに異なり (末尾が C)、応答がどの要求のものかは届いた URL で決まる。応答パラメータに state は無い
+// 送り先 URL (= redirectUri) は RP ごとに 1 本。応答がどの要求のものかは id_token の payload の nonce
+// (拒否応答なら nonce パラメータ) で決まる。要求の内容はすべて Authorization Request URI に載る (by-value)
 //
-// 状態は AuthStore の行だけ。要求ごとに 1 行 (`concrnt-auth:request:<C>`) を置き、応答を受理するときに原子的に消費する
-// (= §9 手順 3 の nonce 一回限り)。別端末フローの結果は `concrnt-auth:result:<H(pollToken)>` に置き、開始したブラウザが
+// 状態は AuthStore の行だけ。要求ごとに 1 行 (`concrnt-auth:request:<nonce>`) を置き、応答を受理するときに原子的に消費する
+// (= §9 手順 7 の nonce 一回限り)。別端末フローの結果は `concrnt-auth:result:<H(pollToken)>` に置き、開始したブラウザが
 // pollToken で原子的に取り出す。秘密鍵は要らない
 import { AuthError } from './errors.js'
 import { emojihash } from './emojihash.js'
 import { randomToken, sha256Base64url } from './encoding.js'
 import type { AuthStore } from './store.js'
-import {
-    RESPONSE_MODES,
-    type AuthorizationResponseParams,
-    type ClientMetadata,
-    type LoginResult,
-    type RequestObject,
-    type ResponseMode,
-    type StartedLogin
-} from './types.js'
-import { verifyIdToken } from './verify.js'
+import { RESPONSE_MODES, type AuthorizationResponseParams, type LoginResult, type ResponseMode, type StartedLogin } from './types.js'
+import { peekIdTokenNonce, verifyIdToken } from './verify.js'
 
 export interface ConcrntAuthOptions {
     /**
-     * RP のオリジン (§5.1)。`scheme://host[:port]`、末尾スラッシュ無し。request_uri / redirect_uri のオリジンであり、
-     * ID Token の aud と比較する値。Authorization Request URI には host しか載らず https が暗黙なので、
-     * https 以外は Authenticator から到達できない (ローカル開発用に http://localhost だけ許す)
+     * RP のオリジン (`scheme://host[:port]`、末尾スラッシュ無し)。送り先 URL は `${origin}${redirectPath}`。
+     * Authorization Request URI には host/path しか載らず https が暗黙なので、https 以外は Authenticator から到達できない。
+     * ローカル開発用に http://localhost / 127.0.0.1 だけ許す (Authenticator は localhost へ http で送ってよい §5.2)。
+     * その場合も RP の識別子 (ID Token の aud) は常に "https://" + host/path (audience)
      */
     origin: string
     /** 要求の行と別端末フローの結果を置く */
     store: AuthStore
-    /** request_uri のパス。`${origin}${requestPath}/${C}` が request_uri になる。既定 `/auth/request` */
-    requestPath?: string
-    /** 応答の送り先 (§5.3 redirect_uri) のパス。`${origin}${redirectPath}/${C}` が redirect_uri になる。既定 `/auth/callback` */
+    /** 応答の送り先 URL のパス。`${origin}${redirectPath}` が送り先 URL (= RP の識別子) になる。既定 `/auth/callback` */
     redirectPath?: string
-    /** §5.3 client_metadata。同意画面に表示される */
-    clientMetadata?: ClientMetadata
-    /** Request Object の有効期間 (秒)。§5.3 は「数分程度」を推奨。既定 300 */
+    /**
+     * §5.2 s: 要求する追加情報 (スペース区切り)。省略すると URI に s を付けず、"profile" を指定したものとみなされる。
+     * '' (空) にすると `s=` が付き CCID だけを要求する
+     */
+    scope?: string
+    /** 要求の行の有効期間 (秒)。Authenticator は関知しない (URI に exp は載らない)。既定 300 */
     requestTtl?: number
-    /** ID Token の iat 判定の許容幅 (秒)。既定 300 */
+    /** ID Token の exp / iat 判定の時計ずれ許容幅 (秒)。既定 300 */
     clockSkew?: number
     /** 現在時刻 (UNIX 秒) の供給元。テスト用。既定 Date.now() */
     now?: () => number
@@ -64,9 +58,8 @@ const RESULT_PREFIX = 'concrnt-auth:result:'
 /** 別端末フローの結果を、要求の失効後も回収できる猶予 (秒) */
 const RESULT_GRACE = 60
 
-/** 要求ごとの行。応答を受理するときに消費される */
+/** 要求ごとの行 (キーは nonce)。応答を受理するときに消費される */
 interface PendingRequest<T> {
-    nonce: string
     exp: number
     /** 開始したブラウザの秘密 pollToken の SHA-256。別端末フローの結果の宛先 */
     pollHash: string
@@ -75,23 +68,25 @@ interface PendingRequest<T> {
 
 export class ConcrntAuth<T = undefined> {
     readonly origin: string
-    readonly host: string
-    readonly requestPath: string
     readonly redirectPath: string
+    /** 応答の送り先 URL (RP が実際に配信する URL)。`${origin}${redirectPath}` */
+    readonly redirectUri: string
+    /** RP の識別子 = ID Token の aud の期待値。"https://" + <host>/<path>。origin が http://localhost でも https 表記 */
+    readonly audience: string
     readonly requestTtl: number
 
     private readonly store: AuthStore
-    private readonly clientMetadata: ClientMetadata | undefined
+    private readonly scope: string | undefined
     private readonly clockSkew: number
     private readonly now: () => number
 
     constructor(options: ConcrntAuthOptions) {
         this.origin = normalizeOrigin(options.origin)
-        this.host = new URL(this.origin).host
         this.store = options.store
-        this.requestPath = normalizePath(options.requestPath ?? '/auth/request', 'requestPath')
         this.redirectPath = normalizePath(options.redirectPath ?? '/auth/callback', 'redirectPath')
-        this.clientMetadata = options.clientMetadata
+        this.redirectUri = this.origin + this.redirectPath
+        this.audience = audienceOf(this.redirectUri)
+        this.scope = options.scope
         this.requestTtl = options.requestTtl ?? 300
         this.clockSkew = options.clockSkew ?? 300
         this.now = options.now ?? (() => Math.floor(Date.now() / 1000))
@@ -104,64 +99,40 @@ export class ConcrntAuth<T = undefined> {
     async start(context: T): Promise<StartedLogin>
     async start(this: ConcrntAuth<undefined>): Promise<StartedLogin>
     async start(context?: T): Promise<StartedLogin> {
-        const challenge = randomToken(16)
+        const nonce = randomToken(16) // §5.2 n: 16 バイトの乱数 (22 文字)。行のキーであり display_code の素
         const pollToken = randomToken(32) // ブラウザだけが知る秘密 (§8.1)。QR には含めない
         const exp = this.now() + this.requestTtl
-        const request: PendingRequest<T> = { nonce: randomToken(32), exp, pollHash: await sha256Base64url(pollToken), context: context as T }
-        await this.store.put(REQUEST_PREFIX + challenge, JSON.stringify(request), exp)
-        const requestUri = `${this.origin}${this.requestPath}/${challenge}`
+        const request: PendingRequest<T> = { exp, pollHash: await sha256Base64url(pollToken), context: context as T }
+        await this.store.put(REQUEST_PREFIX + nonce, JSON.stringify(request), exp)
         return {
-            challenge,
-            requestUri,
-            // 応答方式を選ぶのはブラウザ (§8)。QR には direct_post、同一端末で開くリンクには fragment
-            directPostUri: authorizationRequestUri(requestUri, 'direct_post'),
-            fragmentUri: authorizationRequestUri(requestUri, 'fragment'),
-            displayCode: emojihash(challenge),
+            // 応答方式を選ぶのはブラウザ (§8)。QR には post、同一端末で開くリンクには fragment
+            postUri: authorizationRequestUri(this.redirectUri, 'post', nonce, this.scope),
+            fragmentUri: authorizationRequestUri(this.redirectUri, 'fragment', nonce, this.scope),
+            displayCode: emojihash(nonce),
             exp,
             pollToken
         }
     }
 
-    /** §5.3: Request Object。応答方式に依存しない。要求が無い・期限切れなら invalid_request (404) */
-    async getRequestObject(challenge: string): Promise<RequestObject> {
-        const request = await this.findRequest(challenge)
-        return {
-            // 要求ごとの URL。応答はここに届くので、これだけで要求を復元できる (state は使わない)
-            redirect_uri: this.redirectUriFor(challenge),
-            response_type: 'id_token',
-            scope: 'openid profile',
-            nonce: request.nonce,
-            exp: request.exp,
-            // §5.3 display_code: 常に付ける。Authenticator は direct_post のときだけ同意画面に出す (§6)
-            display_code: emojihash(challenge),
-            ...(this.clientMetadata ? { client_metadata: this.clientMetadata } : {})
-        }
-    }
-
-    /** §5.3 redirect_uri: `${origin}${redirectPath}/${C}` */
-    redirectUriFor(challenge: string): string {
-        return `${this.origin}${this.redirectPath}/${challenge}`
-    }
-
     /**
-     * §8.1: redirect_uri に届いた応答 (別端末の Authenticator からの direct_post)。challenge は届いた URL の末尾。
-     * 検証して要求を消費し、開始したブラウザが pollResult で回収できる場所に結果を置く。
+     * §8.1: 送り先 URL に届いた応答 (別端末の Authenticator からの POST)。
+     * nonce で要求を引いて検証・消費し、開始したブラウザが pollResult で回収できる場所に結果を置く。
      * 叩いてきた相手にセッションを発行してはならないので、結果は返さない。
-     * 失敗は AuthError (invalid_request / request_used / missing_id_token / invalid_id_token)
+     * 失敗は AuthError (invalid_request / request_used / missing_id_token / missing_nonce / invalid_id_token)
      */
-    async receiveDirectPost(challenge: string, params: AuthorizationResponseParams): Promise<void> {
-        const { request, result } = await this.accept(challenge, params)
+    async receivePost(params: AuthorizationResponseParams): Promise<void> {
+        const { request, result } = await this.accept(params)
         await this.store.put(RESULT_PREFIX + request.pollHash, JSON.stringify(result), request.exp + RESULT_GRACE)
     }
 
     /**
-     * §8.2: redirect_uri#id_token=… で開かれたブラウザが、フラグメントの内容をそのまま提示してきたもの。
-     * challenge は開かれた URL (redirect_uri) の末尾。検証して要求を消費し、結果を返す。
+     * §8.2: 送り先 URL#id_token=… で開かれたブラウザが、フラグメントの内容をそのまま提示してきたもの。
+     * nonce で要求を引いて検証・消費し、結果を返す。
      * 呼び出し元 (提示したブラウザ) にセッションを発行するのは利用側の仕事。開始したブラウザには何も届かない。
-     * 失敗は AuthError (invalid_request / request_used / missing_id_token / invalid_id_token)
+     * 失敗は AuthError (invalid_request / request_used / missing_id_token / missing_nonce / invalid_id_token)
      */
-    async exchange(challenge: string, params: AuthorizationResponseParams): Promise<LoginResult<T>> {
-        return (await this.accept(challenge, params)).result
+    async exchange(params: AuthorizationResponseParams): Promise<LoginResult<T>> {
+        return (await this.accept(params)).result
     }
 
     /**
@@ -173,8 +144,9 @@ export class ConcrntAuth<T = undefined> {
         return stored === null ? null : (JSON.parse(stored) as LoginResult<T>)
     }
 
-    private async findRequest(challenge: string): Promise<PendingRequest<T>> {
-        const stored = await this.store.get(REQUEST_PREFIX + challenge)
+    /** §9 手順 2: nonce で要求の行を引く。無い・期限切れ・応答済みは invalid_request (404) */
+    private async findRequest(nonce: string): Promise<PendingRequest<T>> {
+        const stored = await this.store.get(REQUEST_PREFIX + nonce)
         if (stored === null) throw new AuthError('invalid_request', 'unknown, expired or already answered request', 404)
         const request = JSON.parse(stored) as PendingRequest<T>
         if (request.exp <= this.now()) throw new AuthError('invalid_request', 'unknown, expired or already answered request', 404)
@@ -182,27 +154,39 @@ export class ConcrntAuth<T = undefined> {
     }
 
     /**
-     * §8.1 / §8.2 共通: 届いた URL の C の要求を引き、ID Token を検証 (§9) または拒否応答 (§8.3) を読み、
-     * 要求の行を原子的に消費する (§9 手順 3: nonce は一回限り。QR とリンクは同じ要求なので片方で成立すればもう片方も使えない)。
+     * §8.1 / §8.2 共通 (§9 の手順): nonce で要求を引き、ID Token を検証または拒否応答 (§8.3) を読み、
+     * 要求の行を原子的に消費する (手順 7: nonce は一回限り。QR とリンクは同じ要求なので片方で成立すればもう片方も使えない)。
      * 検証に失敗した応答は消費しない
      */
-    private async accept(challenge: string, params: AuthorizationResponseParams): Promise<{ request: PendingRequest<T>; result: LoginResult<T> }> {
-        const request = await this.findRequest(challenge)
+    private async accept(params: AuthorizationResponseParams): Promise<{ request: PendingRequest<T>; result: LoginResult<T> }> {
+        let nonce: string
+        let request: PendingRequest<T>
         let result: LoginResult<T>
         if (params.error === 'access_denied') {
-            // §8.3: ユーザーが拒否した場合のエラー応答
+            // §8.3: 拒否応答は error=access_denied&nonce=<n>
+            if (typeof params.nonce !== 'string' || params.nonce === '') {
+                throw new AuthError('missing_nonce', 'nonce required for an error response', 400)
+            }
+            nonce = params.nonce
+            request = await this.findRequest(nonce)
             result = { status: 'denied', context: request.context }
         } else {
             const idToken = params.id_token
             if (typeof idToken !== 'string' || idToken === '') throw new AuthError('missing_id_token', 'id_token required', 400)
+            // 手順 2: 署名検証の前に payload の nonce で行を引く。検証は行を引いた後 (手順 3〜6)
+            const peeked = peekIdTokenNonce(idToken)
+            if (peeked === null) throw new AuthError('invalid_id_token', 'invalid id_token: malformed JWT or no nonce', 400)
+            nonce = peeked
+            request = await this.findRequest(nonce)
             try {
-                const claims = verifyIdToken(idToken, { origin: this.origin, nonce: request.nonce, now: this.now(), clockSkew: this.clockSkew })
+                const claims = verifyIdToken(idToken, { audience: this.audience, nonce, now: this.now(), clockSkew: this.clockSkew })
                 result = { status: 'ok', claims, idToken, context: request.context }
             } catch (e) {
                 throw new AuthError('invalid_id_token', `invalid id_token: ${(e as Error).message}`, 400)
             }
         }
-        if ((await this.store.consume(REQUEST_PREFIX + challenge)) === null) {
+        // 手順 7: 原子的に消費
+        if ((await this.store.consume(REQUEST_PREFIX + nonce)) === null) {
             throw new AuthError('request_used', 'this request has already been answered', 400)
         }
         return { request, result }
@@ -210,15 +194,19 @@ export class ConcrntAuth<T = undefined> {
 }
 
 /**
- * §5.2: request_uri (https://<host>/<path>) を Authorization Request URI concrnt-auth://<response_mode>/<host>/<path> にする。
- * start() が両方式の URI を返すので通常は呼ばなくてよい
+ * §5.2: 送り先 URL (https://<host>/<path>) から Authorization Request URI
+ * `concrnt-auth://<mode>/<host>/<path>?n=<nonce>[&s=<scope>]` を作る。start() が両方式の URI を返すので通常は呼ばなくてよい。
+ * scope を省略すると s は付かない (= "profile")。'' を渡すと `s=` (CCID のみ)
  */
-export const authorizationRequestUri = (requestUri: string, mode: ResponseMode): string => {
-    if (!RESPONSE_MODES.includes(mode)) throw new AuthError('invalid_option', `unknown response_mode: ${mode}`, 500)
-    const prefix = 'https://'
-    if (!requestUri.startsWith(prefix)) throw new AuthError('invalid_option', `request_uri must be https: ${requestUri}`, 500)
-    return `concrnt-auth://${mode}/${requestUri.slice(prefix.length)}`
+export const authorizationRequestUri = (redirectUri: string, mode: ResponseMode, nonce: string, scope?: string): string => {
+    if (!RESPONSE_MODES.includes(mode)) throw new AuthError('invalid_option', `unknown response type: ${mode}`, 500)
+    if (!/^[A-Za-z0-9_-]{22,}$/.test(nonce)) throw new AuthError('invalid_option', 'nonce must be base64url of at least 16 bytes', 500)
+    const query = `n=${nonce}` + (scope === undefined ? '' : `&s=${encodeURIComponent(scope)}`)
+    return `concrnt-auth://${mode}/${requestTarget(redirectUri)}?${query}`
 }
+
+/** §5.1: ID Token の aud の期待値 = "https://" + <host>/<path>。送り先 URL が http://localhost でも https 表記 */
+export const audienceOf = (redirectUri: string): string => `https://${requestTarget(redirectUri)}`
 
 /**
  * §8.1 (form) / §8.2 (フラグメント) の応答パラメータを取り出す。
@@ -230,7 +218,30 @@ export const parseAuthorizationResponse = (source: FormData | URLSearchParams | 
         const value = source instanceof FormData || source instanceof URLSearchParams ? source.get(name) : source[name]
         return typeof value === 'string' ? value : null
     }
-    return { id_token: pick('id_token'), error: pick('error') }
+    return { id_token: pick('id_token'), error: pick('error'), nonce: pick('nonce') }
+}
+
+/**
+ * 送り先 URL から URI に載せる <host>/<path> を取る。https か、ローカル開発用の http://localhost / 127.0.0.1 のみ。
+ * userinfo・クエリ (本仕様のパラメータが入るので持てない)・フラグメント・空パスは拒否。正規化はしない (aud はこの文字列にバイト一致)
+ */
+const requestTarget = (redirectUri: string): string => {
+    let url: URL
+    try {
+        url = new URL(redirectUri)
+    } catch {
+        throw new AuthError('invalid_option', `redirect URI is not a URL: ${redirectUri}`, 500)
+    }
+    const isLocalhost = url.hostname === 'localhost' || url.hostname === '127.0.0.1'
+    if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLocalhost)) {
+        throw new AuthError('invalid_option', `redirect URI must be https (http only for localhost): ${redirectUri}`, 500)
+    }
+    if (url.username || url.password) throw new AuthError('invalid_option', `redirect URI must not contain userinfo: ${redirectUri}`, 500)
+    if (redirectUri.includes('?') || redirectUri.includes('#')) {
+        throw new AuthError('invalid_option', `redirect URI must not contain a query or fragment: ${redirectUri}`, 500)
+    }
+    if (url.pathname === '/') throw new AuthError('invalid_option', `redirect URI path must not be empty: ${redirectUri}`, 500)
+    return redirectUri.slice(redirectUri.indexOf('://') + 3)
 }
 
 const normalizeOrigin = (origin: string): string => {

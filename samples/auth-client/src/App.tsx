@@ -1,9 +1,9 @@
 // CIP-17 RP のブラウザ側。流れ (開始 → QR / リンク → 応答待ち) は @concrnt/auth-client/browser の runLogin に任せ、
 // ここには fetch の形と画面だけがある。
 //   ログインボタン 1 つで両方の経路を同時に始める:
-//   同一端末 (§8.2): fragmentUri に遷移して同じ端末のアプリを開く。アプリが開く /auth/callback/<C>#id_token=… は
+//   同一端末 (§8.2): fragmentUri に遷移して同じ端末のアプリを開く。アプリが開く /auth/callback#id_token=… は
 //                    Worker の着地ページが受け、このブラウザにログイン cookie を発行して / に戻す (フロントの実装は不要)
-//   別端末   (§8.1): アプリが開かなかった場合に備えて directPostUri の QR も表示し、runLogin が status をポーリングして待つ
+//   別端末   (§8.1): アプリが開かなかった場合に備えて postUri の QR も表示し、runLogin が status をポーリングして待つ
 import { useEffect, useState } from 'react'
 import QRCode from 'qrcode'
 import { runLogin, type LoginChallenge, type LoginStartResponse } from '@concrnt/auth-client/browser'
@@ -63,11 +63,11 @@ export default function App() {
         setNotice(null)
         const ac = new AbortController()
         setAbort(ac)
-        // 応答方式を選ぶのはここ: QR は direct_post、同一端末で開くリンクは fragment。同じ要求から両方作られる
+        // 応答方式を選ぶのはここ: QR は post、同一端末で開くリンクは fragment。同じ要求から両方作られる
         const onChallenge = async (c: LoginChallenge) => {
             // カスタムスキームへの遷移はユーザー操作の直後でないとブラウザに止められる。アプリが無い端末では何も起きない
             location.href = c.fragmentUri
-            setWaiting({ qr: await QRCode.toDataURL(c.directPostUri), fragmentUri: c.fragmentUri, displayCode: c.displayCode, exp: c.exp })
+            setWaiting({ qr: await QRCode.toDataURL(c.postUri), fragmentUri: c.fragmentUri, displayCode: c.displayCode, exp: c.exp })
         }
         try {
             const result = await runLogin<Exclude<StatusResponse, { status: 'pending' }>>({

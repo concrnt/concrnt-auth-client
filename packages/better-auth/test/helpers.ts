@@ -1,9 +1,8 @@
 // 統合テスト用の小さな RP: better-auth + node:sqlite (D1 と同じ SQLite) に concrnt() を差し込み、auth.handler を直接叩く
 import { DatabaseSync } from 'node:sqlite'
 import { betterAuth } from 'better-auth'
-import type { RequestObject } from '@concrnt/auth-client'
 import { concrnt, type ConcrntPluginOptions } from '../src/index.js'
-import { issueIdToken, makeIdentity, type IdTokenOverrides, type TestIdentity } from '../../auth-client/test/authenticator.js'
+import { issueIdToken, makeIdentity, parseRequestUri, type IdTokenOverrides, type TestIdentity } from '../../auth-client/test/authenticator.js'
 
 export { makeIdentity, type TestIdentity }
 
@@ -65,12 +64,15 @@ export const cookiesOf = (res: Response): Headers => {
 export const hasSessionCookie = (res: Response): boolean => /better-auth\.session_token=[^;]+;/.test(res.headers.get('set-cookie') ?? '')
 
 export interface Started {
-    directPostUri: string
+    postUri: string
     fragmentUri: string
     displayCode: string
     exp: number
     pollToken: string
 }
+
+/** 送り先 URL (= RP の識別子 = ID Token の aud)。要求ごとに変わらない */
+export const CALLBACK_URL = `${ORIGIN}${BASE_PATH}/concrnt/callback`
 
 /** ブラウザ: 開始 */
 export const start = async (auth: TestAuth, body: Record<string, unknown> = {}, headers?: HeadersInit) => {
@@ -78,40 +80,32 @@ export const start = async (auth: TestAuth, body: Record<string, unknown> = {}, 
     return { res, started: (res.ok ? await res.json() : null) as Started | null }
 }
 
-export const requestUriOf = (started: Started): string => `https://${started.directPostUri.slice('concrnt-auth://direct_post/'.length)}`
-export const challengeOf = (started: Started): string => started.directPostUri.slice(started.directPostUri.lastIndexOf('/') + 1)
+/** Authenticator: URI の n を読む */
+export const nonceOf = (started: Started): string => parseRequestUri(started.postUri).nonce
 
-/** Authenticator: Request Object を取りに行く */
-export const fetchRequestObject = async (auth: TestAuth, started: Started): Promise<RequestObject> => {
-    const res = await call(auth, 'GET', requestUriOf(started), { authenticator: true })
-    if (!res.ok) throw new Error(`request object: ${res.status} ${await res.text()}`)
-    return json<RequestObject>(res)
-}
+/** Authenticator: ID Token を作る (aud は送り先 URL) */
+export const idTokenFor = (identity: TestIdentity, nonce: string, overrides: IdTokenOverrides = {}): string =>
+    issueIdToken(identity, { nonce, audience: CALLBACK_URL }, Math.floor(Date.now() / 1000), overrides)
 
-/** Authenticator: ID Token を作る */
-export const idTokenFor = (identity: TestIdentity, ro: RequestObject, overrides: IdTokenOverrides = {}): string =>
-    issueIdToken(identity, ro, ORIGIN, Math.floor(Date.now() / 1000), overrides)
-
-/** Authenticator: §8.1 direct_post */
-export const directPost = (auth: TestAuth, ro: RequestObject, form: Record<string, string>): Promise<Response> =>
-    call(auth, 'POST', ro.redirect_uri, { form, authenticator: true })
+/** Authenticator: §8.1 post */
+export const post = (auth: TestAuth, form: Record<string, string>): Promise<Response> => call(auth, 'POST', CALLBACK_URL, { form, authenticator: true })
 
 /** ブラウザ: §8.1 ポーリング */
 export const poll = (auth: TestAuth, started: Started, headers?: HeadersInit): Promise<Response> =>
     call(auth, 'POST', '/concrnt/status', { json: { pollToken: started.pollToken }, headers })
 
 /** ブラウザ (着地ページ): §8.2 exchange */
-export const exchange = (auth: TestAuth, ro: RequestObject, body: { id_token?: string | null; error?: string | null }, headers?: HeadersInit): Promise<Response> =>
-    call(auth, 'POST', ro.redirect_uri.replace('/concrnt/callback/', '/concrnt/exchange/'), { json: body, headers })
+export const exchange = (auth: TestAuth, body: { id_token?: string | null; error?: string | null; nonce?: string | null }, headers?: HeadersInit): Promise<Response> =>
+    call(auth, 'POST', '/concrnt/exchange', { json: body, headers })
 
-/** 別端末フローを最後まで (開始 → RO → direct_post → ポーリング)。headers は開始とポーリングの両方に付く */
-export const directPostFlow = async (auth: TestAuth, identity: TestIdentity, startBody: Record<string, unknown> = {}, headers?: HeadersInit) => {
+/** 別端末フローを最後まで (開始 → URI を読む → post → ポーリング)。headers は開始とポーリングの両方に付く */
+export const postFlow = async (auth: TestAuth, identity: TestIdentity, startBody: Record<string, unknown> = {}, headers?: HeadersInit) => {
     const { res: startRes, started } = await start(auth, startBody, headers)
     if (!started) throw new Error(`start failed: ${startRes.status} ${await startRes.text()}`)
-    const ro = await fetchRequestObject(auth, started)
-    const posted = await directPost(auth, ro, { id_token: idTokenFor(identity, ro) })
+    const nonce = nonceOf(started)
+    const posted = await post(auth, { id_token: idTokenFor(identity, nonce) })
     const polled = await poll(auth, started, headers)
-    return { started, ro, posted, polled }
+    return { started, nonce, posted, polled }
 }
 
 let userSeq = 0

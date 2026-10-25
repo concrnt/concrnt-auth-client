@@ -14,15 +14,14 @@ Cloudflare Workers (バックエンド・D1) + React (フロント)。
   1. ボタン押下
      authClient.signIn.concrnt   -----> POST /api/auth/concrnt/start
                                          要求の行を verification テーブルに作り、QR 用とリンク用の URI を返す
-  2. onChallenge で QR (direct_post) を描き、同一端末リンク (fragment) へ遷移
+  2. onChallenge で QR (post) を描き、同一端末リンク (fragment) へ遷移
 
-  --- 別端末 (§8.1 direct_post) — QR ---
-                                                                              --->  3. QR を読み request_uri を GET
-                                         GET /api/auth/concrnt/request/:C
-                                                                                    4. RP の host と display_code を表示して同意を取る
-                                                                                    5. master key で ID Token に署名
-                                         POST /api/auth/concrnt/callback/:C <------ 6. id_token を direct_post
-                                         検証し、要求の行を消費して結果を預ける → 204 (送信者には何も発行しない)
+  --- 別端末 (§8.1 post) — QR ---
+                                                                              --->  3. QR (concrnt-auth://post/<host>/api/auth/concrnt/callback?n=…) を読む
+                                                                                    4. RP の host と display_code (= emojihash(n)) を表示して同意を取る
+                                                                                    5. master key で ID Token に署名 (aud = 送り先 URL)
+                                         POST /api/auth/concrnt/callback <--------- 6. id_token を送り先 URL に POST
+                                         id_token の nonce で要求を引き、検証し、行を消費して結果を預ける → 204 (送信者には何も発行しない)
   7. (クライアントが自動で) POST /api/auth/concrnt/status { pollToken }
                                          結果を取り出し、account (providerId 'concrnt') からユーザーを引いてセッション cookie を発行
      useSession が更新されてログイン表示
@@ -31,10 +30,10 @@ Cloudflare Workers (バックエンド・D1) + React (フロント)。
      「別のアカウントを使用」→ 1. へ (新しい start で保留は捨てられる)
 
   --- 同一端末 (§8.2 fragment) — リンク ---
-  2'. 遷移 ---------(OS の URL スキーム)----------------------------------------->  3'. request_uri を GET、同意、署名
-                                                                                    4'. redirect_uri#id_token=… をブラウザで開く
-  5'. GET /api/auth/concrnt/callback/:C  → プラグインの着地ページ (HTML)
-      着地ページが POST /api/auth/concrnt/exchange/:C → このブラウザにセッション cookie → callbackURL (/) へ
+  2'. 遷移 ---------(OS の URL スキーム)----------------------------------------->  3'. URI を読み、同意、署名
+                                                                                    4'. 送り先 URL#id_token=… をブラウザで開く
+  5'. GET /api/auth/concrnt/callback  → プラグインの着地ページ (HTML)
+      着地ページが POST /api/auth/concrnt/exchange → このブラウザにセッション cookie → callbackURL (/) へ
       (未登録の CCID なら保留の cookie だけ付けて / へ。ページが GET /api/auth/concrnt/pending-sign-up で気付いて確認画面を出す)
   6'. ログイン表示 (作成したときは newUserCallbackURL (/?welcome=1) に戻り、案内を出す)
 ```
@@ -72,8 +71,8 @@ openssl rand -base64 32 | wrangler secret put BETTER_AUTH_SECRET   # 初回デ�
 
 デプロイ済みの例: <https://better-auth-sample.concrnt.net>
 
-RP のオリジン (CIP-17 §5.1) はリクエストのオリジン (`PUBLIC_ORIGIN` が空のとき) なので、公開 URL は 1 つに定めること
-(`workers_dev: false` にしてある)。
+RP の識別子 (CIP-17 §5.1) は送り先 URL `<オリジン>/api/auth/concrnt/callback` で、オリジンはリクエストのオリジン
+(`PUBLIC_ORIGIN` が空のとき) なので、公開 URL は 1 つに定めること (`workers_dev: false` にしてある)。
 
 ## メモ
 
@@ -84,6 +83,6 @@ RP のオリジン (CIP-17 §5.1) はリクエストのオリジン (`PUBLIC_ORI
 - better-auth の `user` には `email` が必須。Concrnt にメールは無いのでプラグインが `<CCID>@concrnt.placeholder.invalid` を入れる
 - `useSession()` は再取得のたびに未ログインだと `isPending` が立つ (`isRefetching` も同時に true)。待機画面を 3 秒ごとに
   再取得しているので、ローディング表示は `isPending && !isRefetching` で初回だけに限っている
-- Authorization Request URI は `concrnt-auth://direct_post/<host>/api/auth/concrnt/request/<C>` で約 90〜105 バイト (host 次第)
+- Authorization Request URI は `concrnt-auth://post/<host>/api/auth/concrnt/callback?n=<nonce>` で約 80〜95 バイト (host 次第)
 - Cloudflare Web Analytics の自動注入 (beacon.min.js) は、fragment の着地ページでは CSP (`script-src 'sha256-…'`) に弾かれて
   コンソールにエラーが出る。着地ページは一瞬で `callbackURL` へ遷移する中継なので動作に影響はない

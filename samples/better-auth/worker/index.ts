@@ -1,6 +1,6 @@
 // CIP-17 (Sign-In with Concrnt) を better-auth で使う RP のサンプル Worker。
 // ルーティングは better-auth に丸ごと任せる: /api/auth/* を auth.handler に渡すだけで、
-// @concrnt/better-auth が /api/auth/concrnt/* (開始・request_uri・redirect_uri と着地ページ・status・exchange) を生やす。
+// @concrnt/better-auth が /api/auth/concrnt/* (開始・送り先 URL と着地ページ・status・exchange) を生やす。
 // それ以外のパスは静的アセット (SPA) に落ちる
 import { createAuth } from './auth.js'
 
@@ -8,7 +8,7 @@ export default {
     async fetch(request, env) {
         const url = new URL(request.url)
         if (!url.pathname.startsWith('/api/auth/')) return new Response(null, { status: 404 })
-        // RP のオリジン (§5.1)。ローカル開発 (http://localhost) では PUBLIC_ORIGIN で公開 URL を指定する
+        // RP のオリジン。送り先 URL (= RP の識別子 §5.1) は `${origin}/api/auth/concrnt/callback`。ローカル開発 (http://localhost) では PUBLIC_ORIGIN で公開 URL を指定する
         const origin = env.PUBLIC_ORIGIN || url.origin
         try {
             return await createAuth(env, origin, url.hostname).handler(request)

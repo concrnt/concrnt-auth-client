@@ -4,7 +4,7 @@
 //                                                              確認画面を出し、「作る」なら signUp()。断るなら何も呼ばず次のログインへ
 //   ログイン中の CCID は better-auth 組み込みの authClient.listAccounts() の providerId 'concrnt' の行
 //
-// 応答方式 (CIP-17 §8) はサーバーに現れない。1 つの要求から QR 用 (directPostUri) と同一端末リンク用 (fragmentUri) の
+// 応答方式 (CIP-17 §8) はサーバーに現れない。1 つの要求から QR 用 (postUri) と同一端末リンク用 (fragmentUri) の
 // 両方が返るので、onChallenge で QR を描き、同じ端末にアプリがあればリンクへ遷移する。
 //   別端末 (§8.1): このクライアントが status をポーリングし、ok になれば cookie が入っている
 //   同一端末 (§8.2): サーバーの着地ページが exchange まで済ませて callbackURL に戻す。戻ったときには cookie が入っている

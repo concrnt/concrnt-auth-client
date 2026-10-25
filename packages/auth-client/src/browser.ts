@@ -5,9 +5,9 @@
 // このファイルは Web 標準だけに依存するので、サーバー側の依存 (@noble 等) を引かずに import できる
 
 export interface LoginChallenge {
-    /** QR にする Authorization Request URI (concrnt-auth://direct_post/…) */
-    directPostUri: string
-    /** 同一端末で開くリンク (concrnt-auth://fragment/…)。ユーザー操作の直後に location.href で遷移する */
+    /** QR にする Authorization Request URI (concrnt-auth://post/…?n=…) */
+    postUri: string
+    /** 同一端末で開くリンク (concrnt-auth://fragment/…?n=…)。ユーザー操作の直後に location.href で遷移する */
     fragmentUri: string
     /** QR の横に表示する絵文字。Authenticator の同意画面と見比べる (§6) */
     displayCode: string
@@ -44,8 +44,8 @@ export type LoginFlowResult<R> = R | { status: 'expired' } | { status: 'aborted'
 export const runLogin = async <R extends { status: string }>(options: RunLoginOptions<R>): Promise<LoginFlowResult<R>> => {
     const now = options.now ?? (() => Date.now() / 1000)
     const started = await options.start()
-    const { directPostUri, fragmentUri, displayCode, exp, pollToken } = started
-    options.onChallenge?.({ directPostUri, fragmentUri, displayCode, exp })
+    const { postUri, fragmentUri, displayCode, exp, pollToken } = started
+    options.onChallenge?.({ postUri, fragmentUri, displayCode, exp })
 
     const interval = options.pollIntervalMs ?? 2000
     while (true) {

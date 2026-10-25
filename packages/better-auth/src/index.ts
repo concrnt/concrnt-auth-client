@@ -1,7 +1,7 @@
 // Sign-In with Concrnt (CIP-17) を better-auth のプラグインにしたもの。
 //
 // 設計の要点:
-//   - プロトコルの状態機械 (要求の発行・Request Object・応答の受理・一回限り) は @concrnt/auth-client の ConcrntAuth。
+//   - プロトコルの状態機械 (要求の発行・応答の受理・一回限り) は @concrnt/auth-client の ConcrntAuth。
 //     そのストアは better-auth の verification テーブル (要求ごとに 1 行、受理時に consumeVerificationValue で原子的に消費)
 //   - Concrnt の ID Token は「外部で署名された ID Token」なので、検証済みのクレームは better-auth が OAuth / One Tap で使っている
 //     handleOAuthUserInfo にそのまま渡す。account 行 (providerId 'concrnt', accountId = CCID) があればサインイン、
@@ -11,14 +11,13 @@
 //   ブラウザ                              better-auth (basePath 配下)                        Authenticator (world-app)
 //   --------                              ---------------------------                        -------------------------
 //   POST /concrnt/start {callbackURL?, newUserCallbackURL?}  要求を発行。両方の Authorization Request URI と pollToken を返す
-//   QR (direct_post) / リンク (fragment) に
-//                                         GET  /concrnt/request/:C          <----------------- Request Object を取りに来る
-//   --- 別端末 (direct_post, §8.1) ---
-//                                         POST /concrnt/callback/:C         <----------------- 検証し、要求を消費して結果を預ける。204 (送信者には何も発行しない)
+//   QR (post) / リンク (fragment) に       (要求の内容はすべて URI に載る。Authenticator からの取得は無い)
+//   --- 別端末 (post, §8.1) ---
+//                                         POST /concrnt/callback            <----------------- nonce で要求を引き、検証・消費して結果を預ける。204 (送信者には何も発行しない)
 //   POST /concrnt/status {pollToken} ----> 結果を取り出し、このブラウザのためにサインインしてセッションを発行
 //   --- 同一端末 (fragment, §8.2) ---
-//   /concrnt/callback/:C#id_token=… -----> GET は着地ページ (HTML) を返す
-//   POST /concrnt/exchange/:C -----------> 検証し、要求を消費して、このブラウザのためにサインイン
+//   /concrnt/callback#id_token=… --------> GET は着地ページ (HTML) を返す
+//   POST /concrnt/exchange --------------> nonce で要求を引き、検証・消費して、このブラウザのためにサインイン
 //   --- 未登録の CCID で signUp: 'confirm' のとき ---
 //   (status / exchange が) ユーザーを作らず、検証済みの内容を保留行に置き、その id を署名付き cookie に入れて
 //                                         { status: 'signup_required', profile } を返す
@@ -33,7 +32,7 @@ import { setSessionCookie } from 'better-auth/cookies'
 import { parseUserOutput } from 'better-auth/db'
 import { handleOAuthUserInfo } from 'better-auth/oauth2'
 import * as z from 'zod'
-import { AuthError, ConcrntAuth, landingPage, type AuthStore, type ClientMetadata, type IdTokenClaims, type LandingTexts, type LoginResult } from '@concrnt/auth-client'
+import { AuthError, ConcrntAuth, landingPage, type AuthStore, type IdTokenClaims, type LandingTexts, type LoginResult } from '@concrnt/auth-client'
 import { CONCRNT_ERROR_CODES } from './error-codes.js'
 
 export { CONCRNT_ERROR_CODES } from './error-codes.js'
@@ -43,8 +42,6 @@ export type { LandingTexts } from '@concrnt/auth-client'
 export const CONCRNT_PROVIDER_ID = 'concrnt'
 
 export interface ConcrntPluginOptions {
-    /** §5.3 client_metadata。同意画面に表示される。既定は `{ client_name: appName }` */
-    clientMetadata?: ClientMetadata | undefined
     /**
      * 未登録の CCID でログインされたときの扱い。既定 'auto'
      * - 'auto': その場でユーザーを作ってログインする
@@ -53,9 +50,9 @@ export interface ConcrntPluginOptions {
      * - 'disabled': SIGNUP_DISABLED (403)。登録済みの CCID だけがログインできる
      */
     signUp?: 'auto' | 'confirm' | 'disabled' | undefined
-    /** Request Object の有効期間 (秒)。既定 300 */
+    /** 要求の有効期間 (秒)。この間に Authenticator の応答が届かなければ失効する。既定 300 */
     requestTtl?: number | undefined
-    /** fragment 着地ページ (GET /concrnt/callback/:C) の文言 */
+    /** fragment 着地ページ (GET /concrnt/callback) の文言 */
     landing?: Partial<LandingTexts> | undefined
 }
 
@@ -97,15 +94,13 @@ export const concrnt = (options: ConcrntPluginOptions = {}) => {
     })
 
     const authOf = (ctx: GenericEndpointContext): ConcrntAuth<Ceremony> => {
-        // baseURL は basePath 込み (https://rp.example/api/auth)。RP のオリジン (§5.1) はそのオリジン
+        // baseURL は basePath 込み (https://rp.example/api/auth)。送り先 URL (= RP の識別子 §5.1) は `${baseURL}/concrnt/callback`
         const base = new URL(ctx.context.baseURL)
         const basePath = base.pathname.replace(/\/$/, '')
         return new ConcrntAuth<Ceremony>({
             origin: base.origin,
             store: storeOf(ctx),
-            requestPath: `${basePath}/concrnt/request`,
             redirectPath: `${basePath}/concrnt/callback`,
-            clientMetadata: options.clientMetadata ?? { client_name: ctx.context.appName },
             requestTtl
         })
     }
@@ -117,11 +112,13 @@ export const concrnt = (options: ConcrntPluginOptions = {}) => {
         if (!(e instanceof AuthError)) throw e
         switch (e.code) {
             case 'invalid_request':
-                throw APIError.from('NOT_FOUND', CONCRNT_ERROR_CODES.CHALLENGE_NOT_FOUND)
+                throw APIError.from('NOT_FOUND', CONCRNT_ERROR_CODES.REQUEST_NOT_FOUND)
             case 'request_used':
-                throw APIError.from('BAD_REQUEST', CONCRNT_ERROR_CODES.CHALLENGE_ALREADY_USED)
+                throw APIError.from('BAD_REQUEST', CONCRNT_ERROR_CODES.REQUEST_ALREADY_USED)
             case 'missing_id_token':
                 throw APIError.from('BAD_REQUEST', CONCRNT_ERROR_CODES.MISSING_ID_TOKEN)
+            case 'missing_nonce':
+                throw APIError.from('BAD_REQUEST', CONCRNT_ERROR_CODES.MISSING_NONCE)
             case 'invalid_id_token':
                 throw APIError.from('BAD_REQUEST', { ...CONCRNT_ERROR_CODES.INVALID_ID_TOKEN, message: `Invalid id_token: ${e.message}` })
             default:
@@ -192,7 +189,7 @@ export const concrnt = (options: ConcrntPluginOptions = {}) => {
                 name: claims.name ?? ccid,
                 image: claims.picture ?? null
             },
-            account: { providerId: CONCRNT_PROVIDER_ID, accountId: ccid, idToken, scope: 'openid,profile' },
+            account: { providerId: CONCRNT_PROVIDER_ID, accountId: ccid, idToken, scope: 'profile' },
             callbackURL: context.callbackURL,
             disableSignUp: signUp === 'disabled'
         })
@@ -230,20 +227,20 @@ export const concrnt = (options: ConcrntPluginOptions = {}) => {
                 openapi: {
                     operationId: 'startConcrnt',
                     description:
-                        'Start Sign-In with Concrnt (CIP-17). Returns the Authorization Request URIs for QR (direct_post) and link (fragment). A new user is sent to newUserCallbackURL (if given) instead of callbackURL.'
+                        'Start Sign-In with Concrnt (CIP-17). Returns the Authorization Request URIs for QR (post) and link (fragment). A new user is sent to newUserCallbackURL (if given) instead of callbackURL.'
                 }
             }
         },
         async (ctx) => {
             // 新しいログインを始めたら、前回の保留中のサインアップ (signUp: 'confirm') は捨てる
             clearPendingSignUp(ctx)
-            const { directPostUri, fragmentUri, displayCode, exp, pollToken } = await authOf(ctx).start({
+            const { postUri, fragmentUri, displayCode, exp, pollToken } = await authOf(ctx).start({
                 callbackURL: ctx.body?.callbackURL ?? '/',
                 newUserCallbackURL: ctx.body?.newUserCallbackURL
             })
             return ctx.json({
-                // 応答方式を選ぶのはブラウザ (§8)。QR には direct_post、同一端末で開くリンクには fragment
-                directPostUri,
+                // 応答方式を選ぶのはブラウザ (§8)。QR には post、同一端末で開くリンクには fragment
+                postUri,
                 fragmentUri,
                 displayCode,
                 exp,
@@ -253,47 +250,31 @@ export const concrnt = (options: ConcrntPluginOptions = {}) => {
         }
     )
 
-    const getRequestObject = createAuthEndpoint(
-        '/concrnt/request/:challenge',
-        {
-            method: 'GET',
-            metadata: {
-                noStore: true,
-                openapi: { operationId: 'getConcrntRequestObject', description: 'CIP-17 §5.3 Request Object (fetched by the Authenticator).' }
-            }
-        },
-        async (ctx) => {
-            // Authenticator がブラウザ由来の fetch で来る場合 (web 版 Authenticator) に必要
-            ctx.setHeader('Access-Control-Allow-Origin', '*')
-            return ctx.json(await authOf(ctx).getRequestObject(ctx.params.challenge).catch(mapError))
-        }
-    )
-
-    const receiveDirectPost = createAuthEndpoint(
-        '/concrnt/callback/:challenge',
+    const receivePost = createAuthEndpoint(
+        '/concrnt/callback',
         {
             method: 'POST',
-            body: z.looseObject({ id_token: z.string().optional(), error: z.string().optional() }),
+            body: z.looseObject({ id_token: z.string().optional(), error: z.string().optional(), nonce: z.string().optional() }),
             metadata: {
                 // §8.1: Authenticator は application/x-www-form-urlencoded で id_token を POST する
                 allowedMediaTypes: ['application/x-www-form-urlencoded', 'application/json'],
                 noStore: true,
                 openapi: {
-                    operationId: 'concrntDirectPost',
+                    operationId: 'concrntPost',
                     description:
-                        'CIP-17 §8.1 direct_post endpoint (called by the Authenticator). Holds the result for the browser that started the request. Never issues a session to the caller.'
+                        'CIP-17 §8.1 post endpoint (called by the Authenticator). Looks the request up by the nonce in id_token, holds the result for the browser that started the request. Never issues a session to the caller.'
                 }
             }
         },
         async (ctx) => {
             ctx.setHeader('Access-Control-Allow-Origin', '*')
-            await authOf(ctx).receiveDirectPost(ctx.params.challenge, ctx.body).catch(mapError)
+            await authOf(ctx).receivePost(ctx.body).catch(mapError)
             return new Response(null, { status: 204, headers: { 'Access-Control-Allow-Origin': '*' } })
         }
     )
 
     const landing = createAuthEndpoint(
-        '/concrnt/callback/:challenge',
+        '/concrnt/callback',
         {
             method: 'GET',
             metadata: {
@@ -301,24 +282,24 @@ export const concrnt = (options: ConcrntPluginOptions = {}) => {
                 openapi: { operationId: 'concrntFragmentLanding', description: 'CIP-17 §8.2 fragment landing page. Forwards #id_token to the exchange endpoint.' }
             }
         },
-        async (ctx) => landingPage({ exchangeUrl: pathOf(ctx, `exchange/${ctx.params.challenge}`), texts: options.landing })
+        async (ctx) => landingPage({ exchangeUrl: pathOf(ctx, 'exchange'), texts: options.landing })
     )
 
     const exchange = createAuthEndpoint(
-        '/concrnt/exchange/:challenge',
+        '/concrnt/exchange',
         {
             method: 'POST',
-            body: z.object({ id_token: z.string().nullish(), error: z.string().nullish() }),
+            body: z.object({ id_token: z.string().nullish(), error: z.string().nullish(), nonce: z.string().nullish() }),
             requireHeaders: true,
             metadata: {
                 noStore: true,
                 openapi: {
                     operationId: 'concrntExchange',
-                    description: 'CIP-17 §8.2: the browser that opened redirect_uri#id_token=… presents the fragment. Issues a session to this browser.'
+                    description: 'CIP-17 §8.2: the browser that opened the callback URL with #id_token=… presents the fragment. Issues a session to this browser.'
                 }
             }
         },
-        async (ctx) => complete(ctx, await authOf(ctx).exchange(ctx.params.challenge, ctx.body).catch(mapError))
+        async (ctx) => complete(ctx, await authOf(ctx).exchange(ctx.body).catch(mapError))
     )
 
     const status = createAuthEndpoint(
@@ -332,7 +313,7 @@ export const concrnt = (options: ConcrntPluginOptions = {}) => {
                 noStore: true,
                 openapi: {
                     operationId: 'concrntStatus',
-                    description: 'CIP-17 §8.1: the browser that started the request polls for the direct_post result with its pollToken. Issues a session to this browser when the result is ok.'
+                    description: 'CIP-17 §8.1: the browser that started the request polls for the post result with its pollToken. Issues a session to this browser when the result is ok.'
                 }
             }
         },
@@ -390,8 +371,7 @@ export const concrnt = (options: ConcrntPluginOptions = {}) => {
         id: 'concrnt',
         endpoints: {
             startConcrnt: start,
-            getConcrntRequestObject: getRequestObject,
-            concrntDirectPost: receiveDirectPost,
+            concrntPost: receivePost,
             concrntFragmentLanding: landing,
             concrntExchange: exchange,
             concrntStatus: status,

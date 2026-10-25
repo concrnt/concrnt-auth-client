@@ -1,13 +1,13 @@
-// §8.2 fragment の着地ページ。Authenticator が開いた redirect_uri#id_token=… をこのページが受け、
-// フラグメントの内容を同じ要求の exchange エンドポイントに JSON で POST して、開いたブラウザにセッションを発行させる。
-// RP は GET redirect_uri でこのページを返すだけでよく、フロントエンドに着地の実装は要らない。
+// §8.2 fragment の着地ページ。Authenticator が開いた 送り先 URL#id_token=… をこのページが受け、
+// フラグメントの内容 (id_token / error / nonce) を exchange エンドポイントに JSON で POST して、開いたブラウザにセッションを発行させる。
+// RP は GET 送り先 URL でこのページを返すだけでよく、フロントエンドに着地の実装は要らない。
 // スクリプトは固定文字列なので CSP のハッシュで許可でき、exchange の URL と文言は <html> の data 属性で渡す
 
 export const LANDING_SCRIPT = `(function () {
   var root = document.documentElement;
   var msg = document.getElementById('msg');
   var params = new URLSearchParams(location.hash.slice(1));
-  var body = { id_token: params.get('id_token'), error: params.get('error') };
+  var body = { id_token: params.get('id_token'), error: params.get('error'), nonce: params.get('nonce') };
   try { history.replaceState(null, '', location.pathname); } catch (e) {}
   var fail = function (text, callbackURL, code) {
     msg.textContent = text;
@@ -52,7 +52,7 @@ export const DEFAULT_LANDING_TEXTS: LandingTexts = {
 
 export interface LandingPageOptions {
     /**
-     * フラグメントの内容を `{ id_token, error }` の JSON で POST する先 (この要求の exchange エンドポイント)。
+     * フラグメントの内容を `{ id_token, error, nonce }` の JSON で POST する先 (exchange エンドポイント。要求ごとに変わらない)。
      * 応答は `{ status: 'ok' | 'denied', callbackURL? }` か、失敗時は `{ code?, message?, callbackURL? }` を期待する
      */
     exchangeUrl: string
@@ -86,7 +86,7 @@ export const renderLanding = ({ exchangeUrl, callbackURL, texts }: LandingPageOp
 }
 
 /**
- * 着地ページの Response。GET redirect_uri (= `${redirectPath}/${C}`) でそのまま返す。
+ * 着地ページの Response。GET 送り先 URL (= `${origin}${redirectPath}`) でそのまま返す。
  * キャッシュ禁止・Referrer 無し・スクリプトは自身のハッシュだけを許す CSP
  */
 export const landingPage = async (options: LandingPageOptions): Promise<Response> =>

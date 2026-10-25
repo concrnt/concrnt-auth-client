@@ -2,9 +2,9 @@
 // ここには画面だけがある。
 //
 //   ログインボタン → authClient.signIn.concrnt
-//     onChallenge で QR (direct_post) と同一端末リンク (fragment) を受け取り、リンクへ遷移しつつ QR を表示する。
+//     onChallenge で QR (post) と同一端末リンク (fragment) を受け取り、リンクへ遷移しつつ QR を表示する。
 //     別端末 (§8.1): アプリが QR を読んで応答 → クライアントが status をポーリング → ok で useSession が更新される
-//     同一端末 (§8.2): アプリが redirect_uri#id_token=… を開く → サーバーの着地ページが exchange → callbackURL (/) に戻る
+//     同一端末 (§8.2): アプリが送り先 URL#id_token=… を開く → サーバーの着地ページが exchange → callbackURL (/) に戻る
 //   初めての CCID (サーバーは signUp: 'confirm'): ユーザーは作られず結果が signup_required になる。
 //     別端末フローでは結果の profile、同一端末フローでは着地ページから戻ったあと concrnt.pendingSignUp() で分かる。
 //     「作って続行」→ concrnt.signUp() (再承認なし)、「別のアカウントを使用」→ 新しいログインを始める (保留は捨てられる)
@@ -69,11 +69,11 @@ export default function App() {
             callbackURL: '/',
             newUserCallbackURL: '/?welcome=1',
             signal: ac.signal,
-            // 応答方式を選ぶのはここ: QR は direct_post、同一端末で開くリンクは fragment。同じ要求から両方作られる
+            // 応答方式を選ぶのはここ: QR は post、同一端末で開くリンクは fragment。同じ要求から両方作られる
             onChallenge: async (c) => {
                 // カスタムスキームへの遷移はユーザー操作の直後でないとブラウザに止められる。アプリが無い端末では何も起きない
                 location.href = c.fragmentUri
-                setWaiting({ qr: await QRCode.toDataURL(c.directPostUri), fragmentUri: c.fragmentUri, displayCode: c.displayCode, exp: c.exp })
+                setWaiting({ qr: await QRCode.toDataURL(c.postUri), fragmentUri: c.fragmentUri, displayCode: c.displayCode, exp: c.exp })
             }
         })
         setWaiting(null)
