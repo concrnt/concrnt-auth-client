@@ -16,7 +16,7 @@
 	},
 	"dependencies": {
 		"@concrnt/better-auth": "workspace:*",
-		"better-auth": "^1.7.12",
+		"better-auth": "^1.7.14",
 		"kysely": "^0.29.7",
 		"kysely-d1": "^0.4.0",
 		"qrcode": "^1.5.4",
