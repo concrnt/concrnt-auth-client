@@ -1,0 +1,22 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    # better-auth と @better-auth/* は同じバージョンで揃えないと
+    # @better-auth/core が 2 コピーになって型が一致しなくなる。
+    # version updates はこの一族だけに絞り、まとめて 1 PR にする。
+    allow:
+      - dependency-name: better-auth
+      - dependency-name: "@better-auth/*"
+    groups:
+      better-auth:
+        patterns:
+          - better-auth
+          - "@better-auth/*"
+      better-auth-security:
+        applies-to: security-updates
+        patterns:
+          - better-auth
+          - "@better-auth/*"
