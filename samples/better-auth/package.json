@@ -12,11 +12,12 @@
 		"cf-typegen": "wrangler types",
 		"generate-migration": "better-auth generate --config auth.cli.ts --output migrations/0001_init.sql --yes",
 		"migrate:local": "wrangler d1 migrations apply DB --local",
-		"migrate:remote": "wrangler d1 migrations apply DB --remote"
+		"migrate:remote": "wrangler d1 migrations apply DB --remote",
+		"migrate:preview": "wrangler d1 migrations apply DB --preview --remote"
 	},
 	"dependencies": {
 		"@concrnt/better-auth": "workspace:*",
-		"better-auth": "^1.7.14",
+		"better-auth": "^1.7.12",
 		"kysely": "^0.29.7",
 		"kysely-d1": "^0.4.0",
 		"qrcode": "^1.5.4",

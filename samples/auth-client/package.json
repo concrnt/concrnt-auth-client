@@ -11,7 +11,8 @@
 		"deploy": "pnpm run build && wrangler deploy",
 		"cf-typegen": "wrangler types",
 		"migrate:local": "wrangler d1 migrations apply DB --local",
-		"migrate:remote": "wrangler d1 migrations apply DB --remote"
+		"migrate:remote": "wrangler d1 migrations apply DB --remote",
+		"migrate:preview": "wrangler d1 migrations apply DB --preview --remote"
 	},
 	"dependencies": {
 		"@concrnt/auth-client": "workspace:*",

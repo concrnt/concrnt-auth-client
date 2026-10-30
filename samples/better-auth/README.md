@@ -71,6 +71,10 @@ openssl rand -base64 32 | wrangler secret put BETTER_AUTH_SECRET   # 初回デ�
 
 デプロイ済みの例: <https://better-auth-sample.concrnt.net>
 
+PR の Preview (Workers Builds) は `wrangler.jsonc` の `previews` の D1 を使う。作り直すときは `wrangler d1 create auth-client-better-auth-sample-preview` で
+`preview_database_id` と `previews.d1_databases[].database_id` を差し替え、`pnpm migrate:preview` でスキーマを入れる。
+`BETTER_AUTH_SECRET` は Preview 側にも要る: `openssl rand -base64 32 | wrangler preview base-config secret put BETTER_AUTH_SECRET`。
+
 送り先 URL (CIP-17 §5.1・ID Token の aud) は `<オリジン>/api/auth/concrnt/callback?n=…` で、オリジンはリクエストのオリジン
 (`PUBLIC_ORIGIN` が空のとき) なので、公開 URL は 1 つに定めること (`workers_dev: false` にしてある)。
 

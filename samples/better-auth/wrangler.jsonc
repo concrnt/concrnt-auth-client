@@ -11,6 +11,8 @@
 	// 公開 URL。カスタムドメインだけで配信し、*.workers.dev は無効にする (RP のオリジンが 1 つに定まる・CIP-17 §5.1)
 	"routes": [{ "pattern": "better-auth-sample.concrnt.net", "custom_domain": true }],
 	"workers_dev": false,
+	// PR の Preview (`wrangler preview`) は本番のカスタムドメインを使わないので、Preview URL だけ *.workers.dev を許す
+	"preview_urls": true,
 	"observability": {
 		"enabled": true
 	},
@@ -24,6 +26,7 @@
 			"binding": "DB",
 			"database_name": "auth-client-better-auth-sample",
 			"database_id": "c2307554-b0d7-468e-b6dc-436e2ed0e7c1",
+			"preview_database_id": "cfd7221f-4645-47a1-a168-ad5246b05874",
 			"migrations_dir": "migrations"
 		}
 	],
@@ -33,5 +36,17 @@
 		// Authorization Request URI には スキームを外した残りしか載らず https が暗黙なので http では成立しない。空ならリクエストのオリジンを使う。
 		// ローカル開発でトンネル等を使うときは .dev.vars で上書きする
 		"PUBLIC_ORIGIN": ""
+	},
+	// PR ごとの Preview (Workers Builds の非本番ブランチ) 用。本番の vars/bindings は引き継がれないので同じ名前で宣言する。
+	// D1 は Preview 専用 (スキーマは `pnpm migrate:preview`)。PUBLIC_ORIGIN が空なので Preview URL がそのまま RP のオリジンになる
+	"previews": {
+		"vars": { "PUBLIC_ORIGIN": "" },
+		"d1_databases": [
+			{
+				"binding": "DB",
+				"database_name": "auth-client-better-auth-sample-preview",
+				"database_id": "cfd7221f-4645-47a1-a168-ad5246b05874"
+			}
+		]
 	}
 }

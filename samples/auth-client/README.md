@@ -70,6 +70,8 @@ pnpm --filter auth-client-sample dev              # http://localhost:5173
   pnpm run deploy                         # wrangler.jsonc の routes (custom_domain) を自分のドメインに変えてから
   ```
   デプロイ済みの例: <https://auth-client-sample.concrnt.net>
+  PR の Preview (Workers Builds) は `wrangler.jsonc` の `previews` の D1 を使う。作り直すときは `wrangler d1 create auth-client-sample-preview` で
+  `preview_database_id` と `previews.d1_databases[].database_id` を差し替え、`pnpm migrate:preview` でスキーマを入れる。
 - **ローカルをトンネルで公開する**: `cloudflared tunnel --url http://localhost:5173` 等で得た https URL を
   `.dev.vars` の `PUBLIC_ORIGIN` に書く (`.dev.vars.example` 参照)。
 
