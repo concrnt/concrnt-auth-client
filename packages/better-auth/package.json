@@ -37,7 +37,7 @@
 	},
 	"devDependencies": {
 		"@better-auth/core": "^1.7.14",
-		"@types/node": "^24.19.2",
+		"@types/node": "^26.6.5",
 		"better-auth": "^1.7.14",
 		"oxlint": "^1.81.0",
 		"typescript": "~7.0.2",
