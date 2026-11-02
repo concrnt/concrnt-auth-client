@@ -21,15 +21,15 @@
 		"react-dom": "^19.2.8"
 	},
 	"devDependencies": {
-		"@cloudflare/vite-plugin": "^1.64.0",
-		"@types/node": "^26.6.5",
+		"@cloudflare/vite-plugin": "^1.66.0",
+		"@types/node": "^26.6.6",
 		"@types/qrcode": "^1.5.6",
 		"@types/react": "^19.2.18",
 		"@types/react-dom": "^19.2.7",
 		"@vitejs/plugin-react": "^6.1.1",
-		"oxlint": "^1.81.0",
+		"oxlint": "^1.90.0",
 		"typescript": "~7.0.2",
 		"vite": "^8.3.0",
-		"wrangler": "^4.153.0"
+		"wrangler": "^4.156.0"
 	}
 }
