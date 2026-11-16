@@ -36,10 +36,10 @@
 		"zod": "^4.0.0"
 	},
 	"devDependencies": {
-		"@better-auth/core": "^1.7.18",
+		"@better-auth/core": "^1.7.22",
 		"@types/node": "^26.6.6",
-		"better-auth": "^1.7.18",
-		"oxlint": "^1.91.0",
+		"better-auth": "^1.7.22",
+		"oxlint": "^1.93.0",
 		"typescript": "~7.0.2",
 		"vitest": "^5.1.0",
 		"zod": "^4.5.4"
