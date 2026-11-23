@@ -17,7 +17,7 @@
 	},
 	"dependencies": {
 		"@concrnt/better-auth": "workspace:*",
-		"better-auth": "^1.7.22",
+		"better-auth": "^1.7.26",
 		"kysely": "^0.29.9",
 		"kysely-d1": "^0.4.0",
 		"qrcode": "^1.5.4",
@@ -26,15 +26,15 @@
 	},
 	"devDependencies": {
 		"@better-auth/cli": "^1.4.21",
-		"@cloudflare/vite-plugin": "^1.69.1",
+		"@cloudflare/vite-plugin": "^1.70.1",
 		"@types/node": "^26.6.6",
 		"@types/qrcode": "^1.5.6",
 		"@types/react": "^19.2.18",
 		"@types/react-dom": "^19.2.7",
 		"@vitejs/plugin-react": "^6.3.0",
-		"oxlint": "^1.93.0",
+		"oxlint": "^1.94.0",
 		"typescript": "~7.0.2",
 		"vite": "^8.3.8",
-		"wrangler": "^4.161.0"
+		"wrangler": "^4.165.0"
 	}
 }
